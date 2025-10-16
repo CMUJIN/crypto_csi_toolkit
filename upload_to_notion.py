@@ -1,119 +1,61 @@
+# -*- coding: utf-8 -*-
+"""
+upload_to_notion.py (final stable version)
+------------------------------------------
+Features:
+1. Upload only *_chip_strength.csv results.
+2. Show Top 20% zones in Notion summary (≤30 rows).
+3. Display only [low, high, strength] columns.
+4. Format prices intelligently.
+"""
+
 import os
-import csv
-import math
 import pandas as pd
 from notion_client import Client
-from datetime import datetime
+from datetime import datetime, timezone
 
-# ===== Env =====
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")          # 数据库本体（保留结构，仅清空记录）
-NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID")  # 主页，用于展示图+表（只重建我们自己的容器块）
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID")
 
 notion = Client(auth=NOTION_TOKEN)
 
-# ===== Utils =====
-def detect_title_property():
-    """自动识别数据库标题列（title 类型）。"""
-    db = notion.databases.retrieve(NOTION_DATABASE_ID)
-    for k, v in db["properties"].items():
-        if v.get("type") == "title":
-            print(f"[OK] Detected title property: {k}")
-            return k
-    return "Name"
-
+# -----------------------------
+#  Helper functions
+# -----------------------------
 def fmt_price(v):
-    """价格格式：>=100 取整数；<100 保留两位小数；非数值原样返回。"""
+    """Format low/high values based on magnitude"""
     try:
-        x = float(v)
+        v = float(v)
+        return f"{v:.0f}" if v >= 100 else f"{v:.2f}"
     except Exception:
         return str(v)
-    if math.isnan(x) or math.isinf(x):
-        return str(v)
-    if x >= 100:
-        return f"{int(round(x))}"
-    return f"{x:.2f}"
 
 def read_top_chip_strength(csv_path, top_pct=0.2, max_rows=30):
-    """读取 *_chip_strength.csv，按 strength 取前 20%，最多 30 行。"""
+    """Read chip_strength.csv and select top N%"""
     df = pd.read_csv(csv_path)
-    if "strength" not in df.columns:
-        print(f"[!] Missing 'strength' column in {csv_path}, fallback head({max_rows}).")
-        return df.head(max_rows)
+    df = df[[c for c in df.columns if c.lower() in ["low", "high", "strength"]]]
+    df = df.sort_values("strength", ascending=False)
+    top_n = int(len(df) * top_pct)
+    top_n = min(max_rows, max(1, top_n))
+    return df.head(top_n)
 
-    df = df.sort_values(by="strength", ascending=False)
-    cutoff = max(1, int(len(df) * top_pct))
-    top_df = df.head(cutoff)
-    if len(top_df) > max_rows:
-        top_df = top_df.head(max_rows)
-    return top_df
-
-# ===== Database Ops (records only) =====
-def clear_database_records(title_prop):
-    """归档数据库中所有现有页面记录（不删除数据库本体）。"""
-    print("[~] Clearing old database records (archive pages only)...")
-    next_cursor = None
-    total = 0
-    while True:
-        resp = notion.databases.query(
-            database_id=NOTION_DATABASE_ID,
-            start_cursor=next_cursor
-        )
-        results = resp.get("results", [])
-        for page in results:
-            pid = page["id"]
-            title = page["properties"].get(title_prop, {}).get("title", [])
-            name = title[0]["plain_text"] if title else "(untitled)"
-            try:
-                notion.pages.update(page_id=pid, archived=True)
-                total += 1
-                print(f"  - Archived record: {name}")
-            except Exception as e:
-                print(f"  [X] Failed to archive {name}: {e}")
-        if not resp.get("has_more"):
-            break
-        next_cursor = resp.get("next_cursor")
-    print(f"[OK] Database records cleared: {total}")
-
-def insert_database_record(symbol, csv_url, chart_url, title_prop, timeframe="1h"):
-    """插入单条最新记录。"""
-    notion.pages.create(
-        parent={"database_id": NOTION_DATABASE_ID},
-        properties={
-            title_prop: {"title": [{"text": {"content": symbol}}]},
-            "Timeframe": {"rich_text": [{"text": {"content": timeframe}}]},
-            "Updated": {"date": {"start": datetime.now().isoformat()}},
-            "CSV": {"url": csv_url},
-            "Chart": {"url": chart_url},
-        },
-    )
-    print(f"[+] Inserted record: {symbol}")
-
-# ===== Summary Page Ops (safe container) =====
-CONTAINER_TITLE = "Auto Report"
-
-def delete_old_container():
-    """仅删除我们脚本创建的容器块（callout 标题为 CONTAINER_TITLE），不动其它块/数据库视图。"""
-    try:
-        children = notion.blocks.children.list(block_id=NOTION_SUMMARY_PAGE_ID).get("results", [])
-        removed = 0
-        for block in children:
-            if block["type"] == "callout":
-                rich = block["callout"].get("rich_text", [])
-                title_text = "".join([t["plain_text"] for t in rich if t.get("plain_text")])
-                if title_text.strip() == CONTAINER_TITLE:
-                    notion.blocks.delete(block_id=block["id"])
-                    removed += 1
-        print(f"[OK] Removed old container blocks: {removed}")
-    except Exception as e:
-        print(f"[X] Failed to cleanup old container: {e}")
+def clear_summary_page_blocks(page_id):
+    """Delete all blocks under summary page before re-adding"""
+    children = notion.blocks.children.list(page_id).get("results", [])
+    for c in children:
+        try:
+            notion.blocks.delete(c["id"])
+        except Exception:
+            pass
 
 def build_symbol_section_blocks(symbol, csv_path, chart_url):
-    """构建单个币种的图 + Top20%表格（对 Low/High 做定制格式化）。"""
+    """Create heading + image + 3-column Top20% chip_strength table"""
     df = read_top_chip_strength(csv_path, top_pct=0.2, max_rows=30)
+    df["low"] = df["low"].apply(fmt_price)
+    df["high"] = df["high"].apply(fmt_price)
 
-    # 表头
-    headers = list(df.columns)
+    headers = ["low", "high", "strength"]
     header_row = {
         "object": "block",
         "type": "table_row",
@@ -122,19 +64,9 @@ def build_symbol_section_blocks(symbol, csv_path, chart_url):
         },
     }
 
-    # 行数据（Low/High 格式处理）
-    low_keys = {c for c in df.columns if c.lower() == "low"}
-    high_keys = {c for c in df.columns if c.lower() == "high"}
-
     data_rows = []
     for _, row in df.iterrows():
-        cells = []
-        for col in headers:
-            val = row[col]
-            if col in low_keys or col in high_keys:
-                cells.append([{"type": "text", "text": {"content": fmt_price(val)}}])
-            else:
-                cells.append([{"type": "text", "text": {"content": str(val)}}])
+        cells = [[{"type": "text", "text": {"content": str(row[col])}}] for col in headers]
         data_rows.append({
             "object": "block",
             "type": "table_row",
@@ -161,65 +93,88 @@ def build_symbol_section_blocks(symbol, csv_path, chart_url):
     heading_block = {
         "object": "block",
         "type": "heading_2",
-        "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"{symbol} Chip Strength (Top 20%)"}}]},
+        "heading_2": {
+            "rich_text": [
+                {"type": "text", "text": {"content": f"{symbol} Chip Strength (Top 20%)"}}
+            ]
+        },
     }
 
     return [heading_block, image_block, table_block]
 
-def rebuild_summary_container(sections_blocks):
-    """新建容器块（callout），把所有币种的块作为 children 放进去。"""
-    container = {
-        "object": "block",
-        "type": "callout",
-        "callout": {
-            "rich_text": [{"type": "text", "text": {"content": CONTAINER_TITLE}}],
-            # 不设置 icon，避免表情导致兼容问题
-            "children": sections_blocks
-        },
-    }
-    notion.blocks.children.append(
-        block_id=NOTION_SUMMARY_PAGE_ID,
-        children=[container],
-    )
-    print("[OK] Summary page rebuilt.")
 
-# ===== Main =====
+# -----------------------------
+#  Main upload logic
+# -----------------------------
 def upload_to_notion():
     print("[*] Notion sync start...")
-    title_prop = detect_title_property()
 
-    # 收集 chip_strength 结果（而非原始 CSV）
     items = []
-    for fn in os.listdir("docs"):
-        if fn.endswith("_chip_strength.csv"):
-            base = fn.replace("_chip_strength.csv", "")
-            parts = base.split("_")
-            if len(parts) < 3:
-                continue
-            symbol = parts[1]
-            csv_path = os.path.join("docs", fn)
-            csv_url = f"https://cmujin.github.io/crypto_csi_toolkit/{fn}"
-            chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{base}_chip_timeline_pro.png"
-            items.append({"symbol": symbol, "csv_path": csv_path, "csv_url": csv_url, "chart_url": chart_url})
+    for fn in sorted(os.listdir("docs")):
+        if not fn.endswith("_chip_strength.csv"):
+            continue
 
-    print(f"[*] Found {len(items)} chip_strength CSVs.")
+        csv_path = os.path.join("docs", fn)
+        symbol = fn.split("_")[1].upper()
 
-    # 1) 清空数据库记录（仅归档页面，不删库）
-    clear_database_records(title_prop)
+        chart_name = fn.replace("_chip_strength.csv", "_chip_timeline_pro.png")
+        chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{chart_name}"
 
-    # 2) 重新插入最新记录
+        items.append({
+            "symbol": symbol,
+            "csv_path": csv_path,
+            "chart_url": chart_url,
+        })
+
+    print(f"[OK] Found {len(items)} chip_strength CSVs.")
+
+    # clear previous blocks (do NOT delete database)
+    print("[~] Clearing old blocks from summary page...")
+    clear_summary_page_blocks(NOTION_SUMMARY_PAGE_ID)
+
+    # rebuild blocks for each symbol
+    new_blocks = []
     for it in items:
-        insert_database_record(it["symbol"], it["csv_url"], it["chart_url"], title_prop)
+        new_blocks += build_symbol_section_blocks(it["symbol"], it["csv_path"], it["chart_url"])
 
-    # 3) 重建主页报告容器（只删我们自己的容器，不动其它块/数据库视图）
-    delete_old_container()
+    # upload blocks to summary page
+    notion.blocks.children.append(block_id=NOTION_SUMMARY_PAGE_ID, children=new_blocks)
+    print("[OK] Summary page updated successfully!")
 
-    sections = []
+    # update database records (overwrite previous entries)
     for it in items:
-        sections.extend(build_symbol_section_blocks(it["symbol"], it["csv_path"], it["chart_url"]))
+        update_or_create_database_record(it["symbol"], it["chart_url"])
+    print("[OK] Database updated successfully.")
 
-    rebuild_summary_container(sections)
-    print("[OK] Notion sync done.")
+
+def update_or_create_database_record(symbol, chart_url):
+    """Overwrite database record (do not delete database)"""
+    try:
+        pages = notion.databases.query(
+            NOTION_DATABASE_ID,
+            filter={"property": "Token", "title": {"equals": symbol}},
+        )
+        if pages["results"]:
+            page_id = pages["results"][0]["id"]
+            notion.pages.update(
+                page_id=page_id,
+                properties={
+                    "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                    "Chart": {"url": chart_url},
+                },
+            )
+        else:
+            notion.pages.create(
+                parent={"database_id": NOTION_DATABASE_ID},
+                properties={
+                    "Token": {"title": [{"text": {"content": symbol}}]},
+                    "Chart": {"url": chart_url},
+                    "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                },
+            )
+    except Exception as e:
+        print(f"[X] Failed to update DB record for {symbol}: {e}")
+
 
 if __name__ == "__main__":
     upload_to_notion()
