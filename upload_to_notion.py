@@ -10,7 +10,21 @@ NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID")
 
 notion = Client(auth=NOTION_TOKEN)
 
-# === 读取本地 CSV 数据 ===
+
+# === 自动检测数据库标题列名 ===
+def detect_title_property():
+    try:
+        db = notion.databases.retrieve(NOTION_DATABASE_ID)
+        for key, val in db["properties"].items():
+            if val["type"] == "title":
+                print(f"[OK] Detected title property: {key}")
+                return key
+    except Exception as e:
+        print(f"[X] Failed to detect title property: {e}")
+    return "Name"  # fallback
+
+
+# === 读取 CSV 的前若干行预览 ===
 def read_csv_preview(csv_path, max_rows=30):
     rows = []
     with open(csv_path, newline='', encoding="utf-8") as f:
@@ -22,19 +36,23 @@ def read_csv_preview(csv_path, max_rows=30):
             rows.append(row)
     return header, rows
 
-# === 上传到 Notion 数据库 ===
-def update_database_entry(symbol, csv_url, chart_url):
+
+# === 更新数据库中的记录 ===
+def update_database_entry(symbol, csv_url, chart_url, title_prop):
     now = datetime.now().strftime("%B %d, %Y %I:%M %p")
 
-    # 查询是否已存在该 symbol
-    pages = notion.databases.query(
-        **{
-            "database_id": NOTION_DATABASE_ID,
-            "filter": {"property": "Name", "title": {"equals": symbol}},
-        }
-    )
+    try:
+        pages = notion.databases.query(
+            **{
+                "database_id": NOTION_DATABASE_ID,
+                "filter": {"property": title_prop, "title": {"equals": symbol}},
+            }
+        )
+    except Exception as e:
+        print(f"[X] Database query failed: {e}")
+        return
 
-    if pages["results"]:
+    if pages.get("results"):
         page_id = pages["results"][0]["id"]
         print(f"[~] Updated {symbol} in database ({now})")
         notion.pages.update(
@@ -51,7 +69,7 @@ def update_database_entry(symbol, csv_url, chart_url):
         notion.pages.create(
             parent={"database_id": NOTION_DATABASE_ID},
             properties={
-                "Name": {"title": [{"text": {"content": symbol}}]},
+                title_prop: {"title": [{"text": {"content": symbol}}]},
                 "Timeframe": {"rich_text": [{"text": {"content": "1h"}}]},
                 "Updated": {"date": {"start": datetime.now().isoformat()}},
                 "CSV": {"url": csv_url},
@@ -59,13 +77,14 @@ def update_database_entry(symbol, csv_url, chart_url):
             },
         )
 
-# === 更新主页面汇总展示 ===
+
+# === 更新汇总页面 ===
 def update_summary_page(data_items):
     if not NOTION_SUMMARY_PAGE_ID:
         print("[!] No summary page ID provided. Skip summary update.")
         return
 
-    print("[~] Appending updated summary without clearing old blocks...")
+    print("[~] Appending updated summary safely (no clearing)...")
 
     children_blocks = []
     for item in data_items:
@@ -76,7 +95,24 @@ def update_summary_page(data_items):
 
         header, preview = read_csv_preview(csv_path, max_rows=30)
 
-        # 构造 CSV 表格块
+        # 表头
+        header_row = {
+            "object": "block",
+            "type": "table_row",
+            "table_row": {"cells": [[{"type": "text", "text": {"content": h}}] for h in header]},
+        }
+
+        # 数据行
+        data_rows = [
+            {
+                "object": "block",
+                "type": "table_row",
+                "table_row": {"cells": [[{"type": "text", "text": {"content": str(v)}}] for v in row]},
+            }
+            for row in preview
+        ]
+
+        # 生成表格 + 图片 + 标题块
         table_block = {
             "object": "block",
             "type": "table",
@@ -84,50 +120,44 @@ def update_summary_page(data_items):
                 "table_width": len(header),
                 "has_column_header": True,
                 "has_row_header": False,
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "table_row",
-                        "table_row": {"cells": [[{"type": "text", "text": {"content": h}}] for h in header]},
-                    }
-                ]
-                + [
-                    {
-                        "object": "block",
-                        "type": "table_row",
-                        "table_row": {"cells": [[{"type": "text", "text": {"content": str(v)}}] for v in row]},
-                    }
-                    for row in preview
-                ],
+                "children": [header_row] + data_rows,
             },
         }
 
-        # 构造图片块
         image_block = {
             "object": "block",
             "type": "image",
             "image": {"type": "external", "external": {"url": chart_url}},
         }
 
-        children_blocks.append(
-            {
-                "object": "block",
-                "type": "heading_2",
-                "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"{symbol} Analysis"}}]},
-            }
+        children_blocks.extend(
+            [
+                {
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {"rich_text": [{"type": "text", "text": {"content": f"{symbol} Analysis"}}]},
+                },
+                image_block,
+                table_block,
+            ]
         )
-        children_blocks.append(image_block)
-        children_blocks.append(table_block)
 
-    # ✅ 安全模式：仅追加，不清空原有内容
-    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, {"children": children_blocks})
+    # ✅ 正确调用 Notion API append
+    notion.blocks.children.append(
+        block_id=NOTION_SUMMARY_PAGE_ID,
+        children=children_blocks,
+    )
+
     print("[OK] Summary page updated safely ✅")
+
 
 # === 主执行逻辑 ===
 def upload_to_notion():
     print("[*] Starting Notion sync...")
 
+    title_prop = detect_title_property()
     data_items = []
+
     for filename in os.listdir("docs"):
         if filename.endswith("_chip_timeline_pro.png"):
             symbol = filename.split("_")[1]
@@ -141,10 +171,10 @@ def upload_to_notion():
 
     print(f"[*] Found {len(data_items)} CSV files to sync.")
     for item in data_items:
-        update_database_entry(item["symbol"], item["csv_url"], item["chart_url"])
+        update_database_entry(item["symbol"], item["csv_url"], item["chart_url"], title_prop)
 
-    # 🔐 防止页面被清空
     update_summary_page(data_items)
+
 
 # === 程序入口 ===
 if __name__ == "__main__":
