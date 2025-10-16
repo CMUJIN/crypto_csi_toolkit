@@ -54,12 +54,12 @@ def main():
 
     # Normalize column names
     cols = {c.lower().strip(): c for c in df.columns}
-    date_col = next((cols[k] for k in cols if "date" in k or "timestamp" in k), None)
-    open_col = next((cols[k] for k in cols if "open" == k or " open" in k), None)
-    high_col = next((cols[k] for k in cols if "high" == k), None)
-    low_col = next((cols[k] for k in cols if "low" == k), None)
-    close_col = next((cols[k] for k in cols if "close" == k), None)
-    vol_col = next((cols[k] for k in cols if "volume usdt" in k or "volume" == k), None)
+    date_col  = next((cols[k] for k in cols if "date" in k or "timestamp" in k), None)
+    open_col  = next((cols[k] for k in cols if "open" in k), None)
+    high_col  = next((cols[k] for k in cols if "high" in k), None)
+    low_col   = next((cols[k] for k in cols if "low" in k), None)
+    close_col = next((cols[k] for k in cols if "close" in k), None)
+    vol_col   = next((cols[k] for k in cols if "volume usdt" in k or ("volume" in k and "btc" not in k)), None)
 
     if not all([date_col, open_col, high_col, low_col, close_col, vol_col]):
         raise SystemExit(f"[X] Missing required columns. Found: {list(df.columns)}")
@@ -73,6 +73,14 @@ def main():
         vol_col: "volume"
     })
 
+    # 🔧 Fix: remove milliseconds like ".000" to ensure datetime is parseable
+    df["datetime"] = (
+        df["datetime"].astype(str)
+        .str.replace(".000", "", regex=False)
+        .str.strip()
+    )
+
+    # Sort ascending and save
     df = df.iloc[::-1].reset_index(drop=True)
     df = df[["datetime", "open", "high", "low", "close", "volume"]]
     df.to_csv(args.out, index=False, encoding="utf-8")
