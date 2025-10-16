@@ -1,179 +1,127 @@
-
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, sys, argparse, numpy as np, pandas as pd
-import matplotlib
+"""
+Crypto Chip Strength Timeline Analysis (v3.9.1)
+-----------------------------------------------
+Usage:
+  python crypto_chip_timeline_analysis_PRO_v3.9.1.py <CSV_FILE> \
+    --window_strength 5 --window_zone 60 --bins_pct 0.5 \
+    --beta 0.7 --half_life 10000000 --quantile 0.8 \
+    --ma_period 10 --smooth 3
+"""
+
+import argparse, sys, re
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 
-def find_col(df, candidates):
-    for name in candidates:
-        for col in df.columns:
-            if col.lower().strip().replace(' ', '') == name.lower().strip().replace(' ', ''):
-                return col
-    return None
+plt.rcParams["axes.unicode_minus"] = False
 
-def fmt_price(v: float) -> str:
-    return f"{int(round(v))}" if v >= 100 else f"{v:.2f}"
+# ---------------------------------------------------
+def rolling_zscore(series, window):
+    return (series - series.rolling(window).mean()) / (series.rolling(window).std() + 1e-9)
 
-def exp_decay_weights(length: int, half_life: float):
-    if half_life <= 0:
-        return np.ones(length, dtype=float)
-    idx = np.arange(length, dtype=float)
-    age = (length - 1) - idx
-    lam = np.log(2.0) / max(half_life, 1e-9)
-    return np.exp(-lam * age)
-
-def compute_effective_volume(vol: np.ndarray, beta: float, half_life: float):
-    L = len(vol)
-    dec = exp_decay_weights(L, half_life)
-    mix = beta + (1.0 - beta) * dec
-    return vol * mix
-
-def compute_bins(prices: np.ndarray, eff_vol: np.ndarray, bin_pct: float):
-    pmin, pmax = float(np.nanmin(prices)), float(np.nanmax(prices))
-    if pmin <= 0: pmin = max(1e-6, pmin)
-    width = bin_pct / 100.0
-    n_bins = int(np.clip(np.ceil((pmax - pmin) / (pmin * width)), 30, 600))
-    bins = np.linspace(pmin, pmax, n_bins + 1)
-    idx = np.clip(np.digitize(prices, bins) - 1, 0, n_bins - 1)
-    vol_sum = np.bincount(idx, weights=eff_vol, minlength=n_bins).astype(float)
-    total_vol = vol_sum.sum() or 1.0
-    csi = vol_sum / (vol_sum.max() or 1.0)
-    df_out = pd.DataFrame({
-        "price_bin_low": bins[:-1],
-        "price_bin_high": bins[1:],
-        "bin_mid": (bins[:-1] + bins[1:]) / 2.0,
-        "volume_sum": vol_sum,
-        "csi": csi,
-        "pct_of_total_volume": vol_sum / total_vol * 100.0,
-    }).sort_values("price_bin_low").reset_index(drop=True)
-    for c in ["price_bin_low","price_bin_high","bin_mid","volume_sum","csi","pct_of_total_volume"]:
-        df_out[c] = df_out[c].astype(float).round(4)
-    return df_out
-
-def compute_long_short(close: pd.Series, eff_vol: np.ndarray, window_strength: int, smooth: int, window_zone: int):
-    close = close.astype(float)
-    ret = close.pct_change().fillna(0.0)
-    vol_scale = ret.rolling(window=window_zone, min_periods=1).std().replace(0.0, np.nan).fillna(ret.std() or 1.0)
-    shifted_close = close.shift(1).bfill().replace(0, np.nan).bfill()
-    impulse = (close.diff().fillna(0.0) / (vol_scale * shifted_close)) * (eff_vol / (eff_vol.max() or 1.0))
-    impulse = impulse.replace([np.inf, -np.inf], 0.0).fillna(0.0)
-    impulse_s = impulse.rolling(window=window_strength, min_periods=1).mean()
-    long_raw = np.clip(impulse_s, 0, None)
-    short_raw = np.clip(-impulse_s, 0, None)
-    def norm_s(x):
-        m = x.max()
-        y = x / m if m and m > 0 else x * 0
-        if smooth and smooth > 1:
-            y = y.rolling(window=smooth, min_periods=1).mean()
-        return y.fillna(0.0)
-    return norm_s(long_raw), norm_s(short_raw)
-
-def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_curve):
-    matplotlib.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
-    matplotlib.rcParams["axes.unicode_minus"] = False
-
-    df = df.dropna(subset=["datetime"]).sort_values("datetime")
-    t = pd.to_datetime(df["datetime"])
-    price = df["close"].astype(float)
+# ---------------------------------------------------
+def compute_strength(df, window_strength=5, window_zone=60, bins_pct=0.5, beta=0.7, half_life=10000000, quantile=0.8):
+    close = df["close"].astype(float)
     volume = df["volume"].astype(float)
+    n = len(df)
+    bins = int((close.max() - close.min()) / (close.mean() * bins_pct / 100)) + 1
+    bins = max(bins, 10)
+    ranges = np.linspace(close.min(), close.max(), bins + 1)
 
-    fig = plt.figure(figsize=(14, 8))
-    gs = fig.add_gridspec(2, 1, height_ratios=[3, 1.4], hspace=0.15)
-    ax = fig.add_subplot(gs[0, 0]); ax2 = ax.twinx()
+    strength_map = np.zeros(bins)
+    for i in range(window_zone, n):
+        sub_close = close[i - window_zone:i]
+        sub_vol = volume[i - window_zone:i]
+        hist, _ = np.histogram(sub_close, bins=ranges, weights=sub_vol)
+        hist = hist / (hist.sum() + 1e-9)
+        decay = np.exp(-np.arange(window_zone)[::-1] / half_life)
+        weight = np.dot(hist, decay[: len(hist)]) * beta
+        strength_map += hist * weight
+    if strength_map.max() > 0:
+        strength_map /= strength_map.max()
+    return pd.DataFrame({
+        "low": ranges[:-1],
+        "high": ranges[1:],
+        "strength": strength_map
+    })
 
-    ax.plot(t, price, color="black", linewidth=1.4, label="price")
-    ax.set_ylabel("price"); ax2.set_ylabel("strength")
+# ---------------------------------------------------
+def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
+    df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+    t = df["datetime"]
+    close = df["close"].astype(float)
+    volume = df["volume"].astype(float)
+    ma_vol = volume.rolling(ma_period).mean()
 
-    threshold = bins_df["csi"].quantile(quantile)
-    for _, r in bins_df.iterrows():
-        if r["csi"] >= threshold and r["csi"] > 0:
-            ax.axhspan(float(r["price_bin_low"]), float(r["price_bin_high"]), color=(1.0, 0.65, 0.0, 0.25))
-    x_min, x_max = ax.get_xlim()
-    x_text = x_min + 0.01 * (x_max - x_min)
-    used_y = []
-    for _, r in bins_df.iterrows():
-        if r["csi"] >= threshold and r["csi"] > 0:
-            y0, y1 = float(r["price_bin_low"]), float(r["price_bin_high"])
-            label = f"{fmt_price(y0)}–{fmt_price(y1)}  strength:{float(r['csi']):.2f}"
-            y_mid = (y0 + y1) / 2.0
-            dy = (ax.get_ylim()[1] - ax.get_ylim()[0]) * 0.012
-            while any(abs(y_mid - yy) < dy for yy in used_y):
-                y_mid += dy
-            used_y.append(y_mid)
-            ax.text(t.iloc[0], y_mid, label, va="center", ha="left",
-                    bbox=dict(facecolor=(1, 0.9, 0.8, 0.8), edgecolor="none", boxstyle="round,pad=0.2"),
-                    fontsize=9, color="saddlebrown")
+    fig, (axa, axb) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+    axa.plot(t, close, color="black", linewidth=0.9, label="price")
 
-    ax2.plot(t, long_curve.values, color="red", linewidth=1.2, label="long")
-    ax2.plot(t, short_curve.values, color="green", linewidth=1.2, label="short")
-    ax2.set_ylim(0, 1.0)
+    long_strength = rolling_zscore(close, smooth).clip(lower=0)
+    short_strength = (-rolling_zscore(close, smooth)).clip(lower=0)
+    axa.plot(t, long_strength, color="red", linewidth=0.8, label="long")
+    axa.plot(t, short_strength, color="green", linewidth=0.8, label="short")
 
-    ln1, = ax.plot([], [], color="black", label="price")
-    ln2, = ax2.plot([], [], color="red", label="long")
-    ln3, = ax2.plot([], [], color="green", label="short")
-    ax.legend(handles=[ln1, ln2, ln3], loc="upper right", frameon=True)
+    axa.legend(loc="upper right")
+    axa.set_ylabel("price")
 
-    axb = fig.add_subplot(gs[1, 0], sharex=ax)
-    t_num = mdates.date2num(t)
-    bar_width = (t_num[-1] - t_num[0]) * 0.005 if len(t_num) > 1 else 0.02
-    axb.bar(t, volume, width=bar_width, color="gray", alpha=0.8)
-    if ma_period and ma_period > 1:
-        vol_ma = volume.rolling(window=ma_period, min_periods=1).mean()
-        axb.plot(t, vol_ma, color="blue", linewidth=1.2, label="vol MA")
-        axb.legend(loc="upper right")
+    # --- Draw chip strength zones ---
+    for _, row in bins_df.iterrows():
+        alpha_val = 0.15 + 0.35 * row["strength"]
+        axa.axhspan(row["low"], row["high"], color="orange", alpha=alpha_val)
+        if np.random.rand() < 0.05:
+            axa.text(row["low"], row["high"], f"{row['low']:.0f}-{row['high']:.0f}\nstrength:{row['strength']:.2f}",
+                     fontsize=6, color="brown", alpha=0.8)
+
+    # --- Volume subplot ---
+    axb.bar(t, volume, color="gray", alpha=0.6)
+    axb.plot(t, ma_vol, color="blue", linewidth=0.8, label="vol MA")
+    axb.legend(loc="upper right")
     axb.set_ylabel("volume")
-    for label in axb.get_xticklabels():
-        label.set_rotation(30); label.set_ha("right")
-    fig.subplots_adjust(hspace=0.15, top=0.95, bottom=0.08, left=0.08, right=0.92)
-    fig.savefig(out_png, dpi=180, bbox_inches="tight")
-    plt.close(fig)
 
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=180)
+    plt.close(fig)
+    print(f"[OK] Saved timeline figure -> {out_png}")
+
+# ---------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("csv", help="CSV path")
+    ap.add_argument("csv", help="Input CSV file")
     ap.add_argument("--window_strength", type=int, default=5)
     ap.add_argument("--window_zone", type=int, default=60)
     ap.add_argument("--bins_pct", type=float, default=1.0)
     ap.add_argument("--beta", type=float, default=0.7)
-    ap.add_argument("--half_life", type=float, default=10_000_000.0)
+    ap.add_argument("--half_life", type=float, default=10000000)
     ap.add_argument("--quantile", type=float, default=0.8)
     ap.add_argument("--ma_period", type=int, default=10)
     ap.add_argument("--smooth", type=int, default=3)
     args = ap.parse_args()
 
-    if not os.path.exists(args.csv):
-        sys.exit(f"[X] File not found: {args.csv}")
-
     df = pd.read_csv(args.csv)
-    dt_c = find_col(df, ["datetime","date","timestamp"])
-    cl_c = find_col(df, ["close"])
-    vo_c = find_col(df, ["volume","volumeusd","volumeusdt","volume(usdt)","volume usd","volume usdt"])
-    if not all([dt_c, cl_c, vo_c]):
-        sys.exit(f"[X] Missing required columns. Found: {list(df.columns)}")
 
-    df = df[[dt_c, cl_c, vo_c]].copy()
-    df.columns = ["datetime", "close", "volume"]
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    df["volume"] = pd.to_numeric(df["volume"], errors="coerce")
-    df = df.dropna(subset=["close","volume"])
-    if df.empty:
-        sys.exit("[X] No valid rows after cleaning.")
+    # --- 自动识别文件名中的起始日期并过滤 ---
+    m = re.search(r'_(\d{4}-\d{2}-\d{2})_to_', args.csv)
+    if m:
+        start_dt = pd.to_datetime(m.group(1), utc=True)
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
+        df = df[df["datetime"] >= start_dt]
+        print(f"[*] Filtered data from {start_dt.strftime('%Y-%m-%d')} onward, rows={len(df)}")
 
-    eff_vol = compute_effective_volume(df["volume"].values, beta=args.beta, half_life=args.half_life)
-    bins_df = compute_bins(df["close"].values, eff_vol, bin_pct=args.bins_pct)
-    long_curve, short_curve = compute_long_short(df["close"], eff_vol, window_strength=args.window_strength,
-                                                 smooth=args.smooth, window_zone=args.window_zone)
+    # --- Compute CSI ---
+    bins_df = compute_strength(df, args.window_strength, args.window_zone,
+                               args.bins_pct, args.beta, args.half_life, args.quantile)
 
-    out_root = os.path.splitext(args.csv)[0]
-    out_csv = out_root + "_chip_strength.csv"
+    out_csv = args.csv.replace(".csv", "_chip_strength.csv")
     bins_df.to_csv(out_csv, index=False)
     print(f"[OK] Saved chip_strength table -> {out_csv}")
 
-    out_png = out_root + "_chip_timeline_pro.png"
-    draw_timeline(df, bins_df, out_png, ma_period=args.ma_period, quantile=args.quantile,
-                  long_curve=long_curve, short_curve=short_curve)
-    print(f"[OK] Saved timeline figure -> {out_png}")
+    out_png = args.csv.replace(".csv", "_chip_timeline_pro.png")
+    draw_timeline(df, bins_df, out_png,
+                  ma_period=args.ma_period,
+                  quantile=args.quantile,
+                  smooth=args.smooth)
 
 if __name__ == "__main__":
     main()
