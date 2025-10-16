@@ -1,36 +1,35 @@
 name: Auto Crypto CSI Analysis
 
 on:
-  workflow_dispatch:        # ✅ 手动运行入口（必需在最上面）
+  workflow_dispatch:
   schedule:
-    - cron: "0 */4 * * *"   # ✅ 每 4 小时执行一次
+    - cron: "0 */4 * * *"
 
 jobs:
   run-analysis:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔹 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: |
           pip install -r requirements.txt || true
           pip install pandas numpy matplotlib requests openpyxl notion-client pyyaml
 
-      - name: 🕒 Run Crypto CSI Analysis
+      - name: Run Crypto CSI Analysis
         run: |
           echo "=== Start CSI Auto Analysis ==="
           python - <<'PYCODE'
 import subprocess, yaml, datetime
 from pathlib import Path
 
-# === Load config.yaml ===
 config_path = Path("config.yaml")
 if not config_path.exists():
     raise FileNotFoundError("Missing config.yaml")
@@ -63,7 +62,7 @@ for item in config.get("symbols", []):
     ], check=True)
 PYCODE
 
-      - name: 📤 Commit and push results
+      - name: Commit and push results
         run: |
           echo "[INFO] Commit results..."
           git config --global user.email "actions@github.com"
@@ -72,7 +71,7 @@ PYCODE
           git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
           git push || echo "No permission to push"
 
-      - name: 📤 Upload results to Notion
+      - name: Upload results to Notion
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
