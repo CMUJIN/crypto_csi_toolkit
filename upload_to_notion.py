@@ -19,10 +19,7 @@ def find_page_id_by_symbol(symbol: str):
     query = notion.databases.query(
         **{
             "database_id": DATABASE_ID,
-            "filter": {
-                "property": "Name",
-                "title": {"equals": symbol}
-            },
+            "filter": {"property": "Name", "title": {"equals": symbol}},
         }
     )
     results = query.get("results", [])
@@ -30,9 +27,42 @@ def find_page_id_by_symbol(symbol: str):
         return results[0]["id"]
     return None
 
+def clear_old_blocks(page_id):
+    """Clear old blocks under the page (optional cleanup to avoid stacking images)"""
+    children = notion.blocks.children.list(page_id)
+    for child in children.get("results", []):
+        notion.blocks.delete(child["id"])
+
+def add_visual_blocks(page_id, png_url, csv_url):
+    """Insert visual content blocks under the page"""
+    blocks = [
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Latest Chart"}}]},
+        },
+        {
+            "object": "block",
+            "type": "image",
+            "image": {"type": "external", "external": {"url": png_url}},
+        },
+        {
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "CSV Data"}}]},
+        },
+        {
+            "object": "block",
+            "type": "embed",
+            "embed": {"url": csv_url},
+        },
+    ]
+    notion.blocks.children.append(page_id, children=blocks)
+
 def upload_to_notion():
     docs_dir = Path("docs")
     csv_files = list(docs_dir.glob("Binance_*_to_latest.csv"))
+
     for csv_file in csv_files:
         symbol = csv_file.name.split("_")[1]
         png_file = csv_file.with_name(csv_file.stem + "_chip_timeline_pro.png")
@@ -44,7 +74,7 @@ def upload_to_notion():
         page_id = find_page_id_by_symbol(symbol)
         if not page_id:
             print(f"[+] Creating new page for {symbol}")
-            notion.pages.create(
+            new_page = notion.pages.create(
                 **{
                     "parent": {"database_id": DATABASE_ID},
                     "properties": {
@@ -56,6 +86,7 @@ def upload_to_notion():
                     },
                 }
             )
+            page_id = new_page["id"]
         else:
             print(f"[~] Page exists for {symbol}, updating...")
             notion.pages.update(
@@ -68,7 +99,12 @@ def upload_to_notion():
                     },
                 }
             )
-        print(f"[OK] Updated {symbol} | CSV={csv_url} | Chart={png_url}")
+
+        # 🧹 清理旧块并添加新图表/CSV嵌入
+        clear_old_blocks(page_id)
+        add_visual_blocks(page_id, png_url, csv_url)
+
+        print(f"[OK] Updated {symbol} | PNG={png_url} | CSV={csv_url}")
 
 if __name__ == "__main__":
     upload_to_notion()
