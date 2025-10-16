@@ -3,7 +3,7 @@ name: Auto Crypto CSI Analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'  # 每 4 小时执行一次
+    - cron: '0 */4 * * *'  # every 4 hours
 
 permissions:
   contents: write
@@ -13,20 +13,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔹 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
 
-      - name: 🧩 Create analysis runner
+      - name: Create analysis runner
         run: |
           cat > run_analysis.py << 'PY'
           import subprocess, yaml
@@ -37,15 +37,13 @@ jobs:
               raise FileNotFoundError("Missing config.yaml")
 
           cfg = yaml.safe_load(cfg_path.read_text())
-
           symbols = cfg.get("symbols", [])
           analysis = cfg.get("analysis", {})
 
           for item in symbols:
-              # 兼容两种字段写法（symbol/freq 和 name/timeframe）
               symbol = item.get("symbol") or item.get("name")
-              freq   = item.get("freq") or item.get("timeframe") or "1h"
-              start  = item.get("start", "2025-08-01")
+              freq = item.get("freq") or item.get("timeframe") or "1h"
+              start = item.get("start", "2025-08-01")
 
               if not symbol:
                   raise ValueError(f"Invalid entry in config.yaml: {item}")
@@ -74,10 +72,10 @@ jobs:
               ], check=True)
           PY
 
-      - name: 🚀 Run Analysis
+      - name: Run analysis
         run: python run_analysis.py
 
-      - name: 💾 Commit and Push Results
+      - name: Commit and push results
         run: |
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions"
@@ -85,7 +83,7 @@ jobs:
           git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
           git push || echo "No permission to push"
 
-      - name: 📤 Upload to Notion
+      - name: Upload results to Notion
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
