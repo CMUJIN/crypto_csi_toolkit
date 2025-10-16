@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Crypto Chip Strength Timeline Analysis (v3.9.1)
------------------------------------------------
+------------------------------------------------
 Usage:
   python crypto_chip_timeline_analysis_PRO_v3.9.1.py <CSV_FILE> \
     --window_strength 5 --window_zone 60 --bins_pct 0.5 \
@@ -17,14 +17,18 @@ import matplotlib.pyplot as plt
 
 plt.rcParams["axes.unicode_minus"] = False
 
+
 # ---------------------------------------------------
 def rolling_zscore(series, window):
     return (series - series.rolling(window).mean()) / (series.rolling(window).std() + 1e-9)
 
+
 # ---------------------------------------------------
-def compute_strength(df, window_strength=5, window_zone=60, bins_pct=0.5, beta=0.7, half_life=10000000, quantile=0.8):
+def compute_strength(df, window_strength=5, window_zone=60, bins_pct=0.5,
+                     beta=0.7, half_life=10000000, quantile=0.8):
     close = df["close"].astype(float)
     volume = df["volume"].astype(float)
+
     n = len(df)
     bins = int((close.max() - close.min()) / (close.mean() * bins_pct / 100)) + 1
     bins = max(bins, 10)
@@ -39,13 +43,16 @@ def compute_strength(df, window_strength=5, window_zone=60, bins_pct=0.5, beta=0
         decay = np.exp(-np.arange(window_zone)[::-1] / half_life)
         weight = np.dot(hist, decay[: len(hist)]) * beta
         strength_map += hist * weight
+
     if strength_map.max() > 0:
         strength_map /= strength_map.max()
+
     return pd.DataFrame({
         "low": ranges[:-1],
         "high": ranges[1:],
         "strength": strength_map
     })
+
 
 # ---------------------------------------------------
 def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
@@ -55,7 +62,9 @@ def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
     volume = df["volume"].astype(float)
     ma_vol = volume.rolling(ma_period).mean()
 
-    fig, (axa, axb) = plt.subplots(2, 1, figsize=(10, 6), gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+    fig, (axa, axb) = plt.subplots(2, 1, figsize=(10, 6),
+                                   gridspec_kw={"height_ratios": [3, 1]}, sharex=True)
+
     axa.plot(t, close, color="black", linewidth=0.9, label="price")
 
     long_strength = rolling_zscore(close, smooth).clip(lower=0)
@@ -66,15 +75,21 @@ def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
     axa.legend(loc="upper right")
     axa.set_ylabel("price")
 
-    # --- Draw chip strength zones ---
+    # --- 绘制筹码强度区 ---
     for _, row in bins_df.iterrows():
         alpha_val = 0.15 + 0.35 * row["strength"]
         axa.axhspan(row["low"], row["high"], color="orange", alpha=alpha_val)
+        # 随机少量标注区间
         if np.random.rand() < 0.05:
-            axa.text(row["low"], row["high"], f"{row['low']:.0f}-{row['high']:.0f}\nstrength:{row['strength']:.2f}",
+            val_low = row["low"]
+            val_high = row["high"]
+            label_txt = (f"{val_low:.0f}-{val_high:.0f}"
+                         if val_high > 100 else f"{val_low:.2f}-{val_high:.2f}")
+            axa.text(val_low, val_high,
+                     f"{label_txt}\nstrength:{row['strength']:.2f}",
                      fontsize=6, color="brown", alpha=0.8)
 
-    # --- Volume subplot ---
+    # --- 成交量副图 ---
     axb.bar(t, volume, color="gray", alpha=0.6)
     axb.plot(t, ma_vol, color="blue", linewidth=0.8, label="vol MA")
     axb.legend(loc="upper right")
@@ -84,6 +99,7 @@ def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
     fig.savefig(out_png, dpi=180)
     plt.close(fig)
     print(f"[OK] Saved timeline figure -> {out_png}")
+
 
 # ---------------------------------------------------
 def main():
@@ -101,7 +117,24 @@ def main():
 
     df = pd.read_csv(args.csv)
 
-    # --- 自动识别文件名中的起始日期并过滤 ---
+    # --- ✅ 列名标准化，兼容 CryptoDataDownload 各种格式 ---
+    df.columns = [c.strip().lower() for c in df.columns]
+    rename_map = {}
+    for target, cands in {
+        "open": ["open", "opening"],
+        "high": ["high"],
+        "low": ["low"],
+        "close": ["close", "closing", "last"],
+        "volume": ["volume", "volume usdt", "volumeusd", "volume usdt.1", "vol"],
+        "datetime": ["datetime", "date", "timestamp"]
+    }.items():
+        for c in cands:
+            if c in df.columns:
+                rename_map[c] = target
+                break
+    df = df.rename(columns=rename_map)
+
+    # --- ✅ 自动识别文件名中的起始日期并过滤 ---
     m = re.search(r'_(\d{4}-\d{2}-\d{2})_to_', args.csv)
     if m:
         start_dt = pd.to_datetime(m.group(1), utc=True)
@@ -109,7 +142,13 @@ def main():
         df = df[df["datetime"] >= start_dt]
         print(f"[*] Filtered data from {start_dt.strftime('%Y-%m-%d')} onward, rows={len(df)}")
 
-    # --- Compute CSI ---
+    # --- 校验必要列 ---
+    for col in ["close", "volume", "datetime"]:
+        if col not in df.columns:
+            print(f"[X] Missing required column: {col}. Columns = {list(df.columns)}")
+            sys.exit(1)
+
+    # --- 计算筹码强度 ---
     bins_df = compute_strength(df, args.window_strength, args.window_zone,
                                args.bins_pct, args.beta, args.half_life, args.quantile)
 
@@ -122,6 +161,7 @@ def main():
                   ma_period=args.ma_period,
                   quantile=args.quantile,
                   smooth=args.smooth)
+
 
 if __name__ == "__main__":
     main()
