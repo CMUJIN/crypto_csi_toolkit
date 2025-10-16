@@ -1,110 +1,56 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-crypto_cdd_fetcher.py
--------------------------------------
-Fetch static OHLCV CSVs from CryptoDataDownload (CDD).
-Automatically skips comments and non-tabular lines.
-Compatible with Binance 1h / 4h / 1d data.
+Fetch crypto CSV from CryptoDataDownload (CDD) for Binance pairs.
+Usage:
+  python crypto_cdd_fetcher.py --symbol ETHUSDT --freq 1h --start 2025-08-01 --out data/Binance_ETHUSDT_1h_2025-08-01_to_latest.csv
 """
 
-import argparse
-import re
+import argparse, sys
 import pandas as pd
 import requests
 from io import StringIO
 
-def parse_args():
-    ap = argparse.ArgumentParser(description="Fetch static OHLCV from CryptoDataDownload.")
-    ap.add_argument("--symbol", required=True, help="Symbol, e.g. ETHUSDT")
-    ap.add_argument("--freq", required=True, help="Frequency: 1h, 4h, or 1d")
-    ap.add_argument("--out", required=True, help="Output CSV file path")
-    return ap.parse_args()
-
-def build_url(symbol: str, freq: str) -> str:
-    base = "https://www.cryptodatadownload.com/cdd"
-    sym = symbol.upper()
-    freq = freq.lower()
-    if not freq.endswith(("h", "d")):
-        raise ValueError("Unsupported freq: must be one of 1h, 4h, 1d")
-    return f"{base}/Binance_{sym}_{freq}.csv"
-
-# --- robust datetime cleaner ---
-_dt_frac_re = re.compile(r"(\.\d+)(?=$)")  # strip trailing .### at end
-def clean_datetime_str(x: str) -> str:
-    s = str(x).strip()
-    # unify separators
-    s = s.replace("T", " ").replace("Z", "")
-    # remove trailing fractional seconds like .000, .800, .123456
-    s = _dt_frac_re.sub("", s)
-    # if only date provided, append 00:00:00
-    if len(s) == 10 and re.match(r"^\d{4}-\d{2}-\d{2}$", s):
-        s = s + " 00:00:00"
-    # if format like YYYY/MM/DD, normalize to YYYY-MM-DD
-    s = s.replace("/", "-")
-    return s
-
 def main():
-    args = parse_args()
-    url = build_url(args.symbol, args.freq)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--symbol", required=True, help="Symbol, e.g. ETHUSDT")
+    ap.add_argument("--freq", required=True, help="Frequency, e.g. 1h or d")
+    ap.add_argument("--start", required=True, help="Start date, e.g. 2025-08-01")
+    ap.add_argument("--out", required=True, help="Output CSV path")
+    args = ap.parse_args()
+
+    url = f"https://www.cryptodatadownload.com/cdd/Binance_{args.symbol}_{args.freq}.csv"
     print(f"[*] Fetching: {url}")
+    try:
+        r = requests.get(url, timeout=60)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"[X] Download failed: {e}")
+        sys.exit(1)
 
-    resp = requests.get(url, timeout=60)
-    if resp.status_code != 200:
-        raise SystemExit(f"[X] Download failed: HTTP {resp.status_code}")
+    # Clean and load
+    csv_data = r.text.splitlines()
+    # remove leading comments (starts with 'Downloaded from')
+    csv_data = [line for line in csv_data if not line.startswith("Downloaded from")]
+    df = pd.read_csv(StringIO("\n".join(csv_data)), low_memory=False)
 
-    # Filter out comment lines and junk headers
-    lines = []
-    started = False
-    for ln in resp.text.splitlines():
-        if ln.strip().startswith("#") or not ln.strip():
-            continue
-        # Detect real header row (contains "Date" and "Open")
-        if "Date" in ln and "Open" in ln:
-            started = True
-        if started:
-            lines.append(ln)
-    if not lines:
-        raise SystemExit("[X] No valid CSV content detected in response.")
+    # detect date column
+    date_col = None
+    for c in df.columns:
+        if "date" in c.lower():
+            date_col = c
+            break
+    if date_col is None:
+        print(f"[X] No date/timestamp column found: {list(df.columns)}")
+        sys.exit(2)
 
-    df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
+    # standardize and filter
+    df["datetime"] = pd.to_datetime(df[date_col], errors="coerce", utc=True)
+    df = df.dropna(subset=["datetime"]).sort_values("datetime")
+    start_dt = pd.to_datetime(args.start, utc=True)
+    df = df[df["datetime"] >= start_dt]
 
-    # Normalize column names
-    cols = {c.lower().strip(): c for c in df.columns}
-    date_col  = next((cols[k] for k in cols if "date" in k or "timestamp" in k or "datetime" in k), None)
-    open_col  = next((cols[k] for k in cols if "open" in k), None)
-    high_col  = next((cols[k] for k in cols if "high" in k), None)
-    low_col   = next((cols[k] for k in cols if "low" in k), None)
-    close_col = next((cols[k] for k in cols if "close" in k), None)
-    # prefer USDT volume; otherwise generic "volume" (but not BTC volume)
-    vol_col   = next((cols[k] for k in cols if "volume usdt" in k), None)
-    if vol_col is None:
-        vol_col = next((cols[k] for k in cols if ("volume" in k and "btc" not in k)), None)
-
-    if not all([date_col, open_col, high_col, low_col, close_col, vol_col]):
-        raise SystemExit(f"[X] Missing required columns. Found: {list(df.columns)}")
-
-    df = df.rename(columns={
-        date_col: "datetime",
-        open_col: "open",
-        high_col: "high",
-        low_col: "low",
-        close_col: "close",
-        vol_col: "volume"
-    })
-
-    # 🔧 key fix: normalize datetime strings (remove any fractional seconds like .000/.800/.123456)
-    df["datetime"] = df["datetime"].astype(str).map(clean_datetime_str)
-
-    # sort ascending and keep standard columns
-    df = df.iloc[::-1].reset_index(drop=True)
-    df = df[["datetime", "open", "high", "low", "close", "volume"]]
-
-    # enforce numeric on OHLCV to avoid dtype issues
-    for c in ["open", "high", "low", "close", "volume"]:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
-
-    df.to_csv(args.out, index=False, encoding="utf-8")
+    df.to_csv(args.out, index=False)
     print(f"[✓] Saved -> {args.out}  rows={len(df)}")
 
 if __name__ == "__main__":
