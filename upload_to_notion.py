@@ -1,149 +1,149 @@
 import os
-import csv
+import pandas as pd
 from notion_client import Client
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timezone
 
-# 环境变量
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")   # 数据库
-NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID")  # 主展示页
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID", "").strip()
 
 notion = Client(auth=NOTION_TOKEN)
-REPO_BASE = "https://cmujin.github.io/crypto_csi_toolkit"
-
-
-# ==== 工具函数 ====
-
-def notion_url(path: str) -> str:
-    ts = int(datetime.now().timestamp())
-    return f"{REPO_BASE}/{path}?ver={ts}"
-
-
-def parse_csv_preview(csv_path: Path, max_rows=30):
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = list(csv.reader(f))
-        headers = reader[0]
-        rows = reader[1:max_rows + 1]
-        if len(reader) > max_rows + 1:
-            rows.append(["..."] * len(headers))
-    return headers, rows
-
-
-# ==== Notion数据库更新 ====
-
-def update_database(symbol, freq, csv_url, png_url):
-    query = notion.databases.query(
-        database_id=NOTION_DATABASE_ID,
-        filter={"property": "Name", "title": {"equals": symbol}},
-    )
-    updated_time = datetime.now().strftime("%B %d, %Y %I:%M %p")
-
-    props = {
-        "Name": {"title": [{"text": {"content": symbol}}]},
-        "Timeframe": {"rich_text": [{"text": {"content": freq}}]},
-        "Updated": {"date": {"start": datetime.now().astimezone().isoformat()}},
-        "CSV": {"url": csv_url},
-        "Chart": {"url": png_url},
-    }
-
-    if query["results"]:
-        page_id = query["results"][0]["id"]
-        notion.pages.update(page_id=page_id, properties=props)
-        print(f"[~] Updated {symbol} in database ({updated_time})")
-    else:
-        notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
-        print(f"[+] Created new database entry for {symbol}")
-
-
-# ==== 主页面展示区块 ====
-
-def build_symbol_section(symbol, png_url, csv_path):
-    headers, rows = parse_csv_preview(csv_path)
-    table_rows = []
-
-    # Header
-    table_rows.append({
-        "object": "block",
-        "type": "table_row",
-        "table_row": {
-            "cells": [[{"type": "text", "text": {"content": h}}] for h in headers]
-        },
-    })
-
-    # Rows
-    for row in rows:
-        table_rows.append({
-            "object": "block",
-            "type": "table_row",
-            "table_row": {
-                "cells": [[{"type": "text", "text": {"content": str(c)}}] for c in row]
-            },
-        })
-
-    # 返回区块
-    return [
-        {
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {
-                "rich_text": [{"type": "text", "text": {"content": f"{symbol} Analysis"}}]
-            },
-        },
-        {
-            "object": "block",
-            "type": "image",
-            "image": {"type": "external", "external": {"url": png_url}},
-        },
-        {
-            "object": "block",
-            "type": "table",
-            "table": {
-                "has_column_header": True,
-                "has_row_header": False,
-                "table_width": len(headers),
-                "children": table_rows,
-            },
-        },
-        {"object": "block", "type": "divider", "divider": {}},
-    ]
-
-
-# ==== 主流程 ====
 
 def upload_to_notion():
-    docs_dir = Path("docs")
-    csv_files = list(docs_dir.glob("Binance_*_to_latest.csv"))
-    all_blocks = []
+    print("[*] Starting Notion sync...")
 
+    # 1️⃣ 查找 CSV 文件
+    csv_files = [f for f in os.listdir("docs") if f.endswith(".csv")]
     print(f"[*] Found {len(csv_files)} CSV files to sync.")
 
     for csv_file in csv_files:
-        symbol = csv_file.name.split("_")[1]
-        png_file = csv_file.with_name(csv_file.stem + "_chip_timeline_pro.png")
-        freq = csv_file.name.split("_")[2] if len(csv_file.name.split("_")) > 2 else "1h"
+        symbol = csv_file.split("_")[1] if "_" in csv_file else csv_file
+        csv_path = f"docs/{csv_file}"
+        png_path = csv_path.replace(".csv", "_chip_timeline_pro.png")
 
-        csv_url = notion_url(csv_file.name)
-        png_url = notion_url(png_file.name)
+        # 生成 GitHub Pages URL
+        base_url = "https://cmujin.github.io/crypto_csi_toolkit/"
+        timestamp = int(datetime.now().timestamp())
+        csv_url = f"{base_url}{csv_file}?ver={timestamp}"
+        png_url = f"{base_url}{os.path.basename(png_path)}?ver={timestamp}"
 
-        # 1️⃣ 更新数据库
-        update_database(symbol, freq, csv_url, png_url)
+        # 读取 CSV 数据
+        df = pd.read_csv(csv_path)
 
-        # 2️⃣ 生成汇总展示块
-        section = build_symbol_section(symbol, png_url, csv_file)
-        all_blocks.extend(section)
+        # 🧮 动态选取显示区间（前20%强度，最多30行）
+        if "strength" in df.columns:
+            threshold = df["strength"].quantile(0.8)
+            highlight_rows = df[df["strength"] >= threshold]
+            rows = highlight_rows if len(highlight_rows) <= 30 else highlight_rows.head(30)
+        else:
+            rows = df.head(30)
 
-    # 清空主页面旧内容
-    print("[~] Clearing old dashboard blocks...")
-    children = notion.blocks.children.list(NOTION_SUMMARY_PAGE_ID).get("results", [])
-    for child in children:
-        notion.blocks.delete(child["id"])
+        # 格式化时间
+        now_str = datetime.now(timezone.utc).astimezone().strftime("%B %d, %Y %I:%M %p")
 
-    # 写入新内容
-    print("[*] Uploading new dashboard blocks...")
-    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=all_blocks)
+        # 2️⃣ 更新数据库条目
+        pages = notion.databases.query(
+            **{
+                "database_id": NOTION_DATABASE_ID,
+                "filter": {"property": "Name", "title": {"equals": symbol}},
+            }
+        ).get("results", [])
 
-    print("[✅] Dashboard & Database updated successfully!")
+        if pages:
+            page_id = pages[0]["id"]
+            print(f"[~] Updated {symbol} in database ({now_str})")
+            notion.pages.update(
+                page_id=page_id,
+                properties={
+                    "Last Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                    "Chart": {"url": png_url},
+                    "CSV": {"url": csv_url},
+                },
+            )
+        else:
+            print(f"[+] Creating new entry for {symbol}")
+            notion.pages.create(
+                parent={"database_id": NOTION_DATABASE_ID},
+                properties={
+                    "Name": {"title": [{"text": {"content": symbol}}]},
+                    "Last Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                    "Chart": {"url": png_url},
+                    "CSV": {"url": csv_url},
+                },
+            )
+
+    # 3️⃣ 更新主汇总页面
+    if NOTION_SUMMARY_PAGE_ID:
+        print("[~] Updating main summary dashboard...")
+
+        # 清空旧内容
+        notion.blocks.children.append(
+            NOTION_SUMMARY_PAGE_ID,
+            {
+                "children": []
+            }
+        )
+
+        # 构建表格块
+        table_children = []
+        for csv_file in csv_files:
+            symbol = csv_file.split("_")[1]
+            csv_path = f"docs/{csv_file}"
+            png_path = csv_path.replace(".csv", "_chip_timeline_pro.png")
+            png_url = f"{base_url}{os.path.basename(png_path)}?ver={timestamp}"
+            df = pd.read_csv(csv_path)
+
+            # 同样的筛选逻辑
+            if "strength" in df.columns:
+                threshold = df["strength"].quantile(0.8)
+                highlight_rows = df[df["strength"] >= threshold]
+                rows = highlight_rows if len(highlight_rows) <= 30 else highlight_rows.head(30)
+            else:
+                rows = df.head(30)
+
+            # 添加图片
+            table_children.append({
+                "object": "block",
+                "type": "image",
+                "image": {
+                    "type": "external",
+                    "external": {"url": png_url}
+                }
+            })
+
+            # 添加表格
+            table_rows = []
+            for _, row in rows.iterrows():
+                cols = [str(v)[:12] for v in row.values[:6]]
+                table_rows.append({
+                    "object": "block",
+                    "type": "table_row",
+                    "table_row": {
+                        "cells": [[{"text": {"content": c}}] for c in cols]
+                    }
+                })
+
+            if table_rows:
+                table_children.append({
+                    "object": "block",
+                    "type": "table",
+                    "table": {
+                        "has_column_header": False,
+                        "has_row_header": False,
+                        "table_width": len(rows.columns[:6]),
+                        "children": table_rows
+                    }
+                })
+
+        # 上传汇总内容
+        notion.blocks.children.append(
+            NOTION_SUMMARY_PAGE_ID,
+            {"children": table_children}
+        )
+
+        print("[OK] Dashboard updated successfully.")
+
+    print("[✓] All sync operations completed.")
 
 
 if __name__ == "__main__":
