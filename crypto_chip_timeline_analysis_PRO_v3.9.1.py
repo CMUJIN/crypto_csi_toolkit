@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Chip Strength Timeline Analysis (v3.9.2)
+Crypto Chip Strength Timeline Analysis (v3.9.3)
 ------------------------------------------------
 Usage:
-  python crypto_chip_timeline_analysis_PRO_v3.9.2.py <CSV_FILE> \
+  python crypto_chip_timeline_analysis_PRO_v3.9.3.py <CSV_FILE> \
     --window_strength 5 --window_zone 60 --bins_pct 0.5 \
     --beta 0.7 --half_life 10000000 --quantile 0.8 \
     --ma_period 10 --smooth 3
@@ -46,7 +46,7 @@ def compute_strength(df, window_strength=5, window_zone=60, bins_pct=0.5,
         hist, _ = np.histogram(sub_close, bins=ranges, weights=sub_vol)
         hist = hist / (hist.sum() + 1e-9)
 
-        # ✅ 修复维度错误：使用成交量平均衰减权重代替 dot()
+        # ✅ 修复维度错误：使用成交量衰减平均权重代替 dot()
         w = np.average(hist) * beta + (1 - beta) * np.mean(decay)
         strength_map += hist * w
 
@@ -88,7 +88,6 @@ def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
     for _, row in bins_df.iterrows():
         alpha_val = 0.15 + 0.35 * row["strength"]
         axa.axhspan(row["low"], row["high"], color="orange", alpha=alpha_val)
-        # Randomly annotate a few zones
         if np.random.rand() < 0.05:
             val_low = row["low"]
             val_high = row["high"]
@@ -103,6 +102,10 @@ def draw_timeline(df, bins_df, out_png, ma_period=10, quantile=0.8, smooth=3):
     axb.plot(t, ma_vol, color="blue", linewidth=0.8, label="vol MA")
     axb.legend(loc="upper right")
     axb.set_ylabel("volume")
+
+    # ✅ 修正：纵坐标范围自适应，不再从0开始
+    ymin, ymax = close.min(), close.max()
+    axa.set_ylim(ymin * 0.98, ymax * 1.02)
 
     fig.tight_layout()
     fig.savefig(out_png, dpi=180)
