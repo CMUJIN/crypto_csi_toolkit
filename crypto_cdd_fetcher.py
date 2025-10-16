@@ -1,125 +1,78 @@
-
 # -*- coding: utf-8 -*-
-import argparse, time, sys, datetime as dt
-import pandas as pd
+"""
+crypto_cdd_fetcher.py
+-------------------------------------
+从 CryptoDataDownload (CDD) 下载静态 CSV 数据。
+支持 Binance 现货 1h/4h/1d 数据，
+输出标准格式，可直接供 crypto_chip_timeline_analysis_PRO_v3.9.1.py 使用。
 
-def norm_symbol(sym: str) -> str:
-    s = sym.strip().upper().replace('-', '/')
-    if '/' in s:
-        return s
-    QUOTES = ['USDT','USDC','USD','BTC','ETH','BUSD','TUSD','FDUSD']
-    for q in sorted(QUOTES, key=len, reverse=True):
-        if s.endswith(q):
-            base = s[:-len(q)]
-            if base:
-                return f"{base}/{q}"
-    return s
+Usage:
+  python crypto_cdd_fetcher.py --symbol ETHUSDT --freq 1h --out data/Binance_ETHUSDT_1h.csv
+"""
+
+import argparse
+import pandas as pd
+import requests
+from io import StringIO
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Fetch OHLCV via ccxt and save CSV (datetime, open, high, low, close, volume).")
-    ap.add_argument("--exchange", default="binance")
-    ap.add_argument("--symbol", required=True)
-    ap.add_argument("--freq", required=True)
-    ap.add_argument("--start", required=True)
-    ap.add_argument("--end", default=None)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--limit", type=int, default=1000)
+    ap = argparse.ArgumentParser(description="Fetch static OHLCV from CryptoDataDownload.")
+    ap.add_argument("--symbol", required=True, help="Symbol, e.g. ETHUSDT")
+    ap.add_argument("--freq", required=True, help="Frequency: 1h, 4h, or 1d")
+    ap.add_argument("--out", required=True, help="Output CSV file path")
     return ap.parse_args()
 
-def ensure_ccxt():
-    try:
-        import ccxt  # noqa
-        return True
-    except Exception:
-        print("[X] ccxt is required. pip install ccxt", file=sys.stderr)
-        return False
-
-def ms(ts: dt.datetime) -> int:
-    return int(ts.timestamp() * 1000)
-
-def iso(ts_ms: int) -> str:
-    return dt.datetime.utcfromtimestamp(ts_ms/1000).strftime("%Y-%m-%d %H:%M:%S")
+def build_url(symbol: str, freq: str) -> str:
+    base = "https://www.cryptodatadownload.com/cdd"
+    sym = symbol.upper()
+    freq = freq.lower()
+    if not freq.endswith("h") and not freq.endswith("d"):
+        raise ValueError("Unsupported freq, must be one of: 1h, 4h, 1d")
+    # Example: Binance_ETHUSDT_1h.csv
+    return f"{base}/Binance_{sym}_{freq}.csv"
 
 def main():
     args = parse_args()
-    if not ensure_ccxt():
-        sys.exit(2)
-    import ccxt
+    url = build_url(args.symbol, args.freq)
+    print(f"[*] Fetching: {url}")
 
-    ex_id = args.exchange.lower()
-    if not hasattr(ccxt, ex_id):
-        sys.exit(f"[X] Unsupported exchange: {ex_id}")
-    ex = getattr(ccxt, ex_id)({"enableRateLimit": True})
+    resp = requests.get(url)
+    if resp.status_code != 200:
+        raise SystemExit(f"[X] Download failed: HTTP {resp.status_code}")
 
-    symbol = norm_symbol(args.symbol)
-    timeframe = args.freq
-    try:
-        ex.load_markets()
-    except Exception as e:
-        sys.exit(f"[X] load_markets failed: {e}")
+    text = resp.text
+    # 跳过注释行
+    lines = [ln for ln in text.splitlines() if not ln.startswith("#") and ln.strip()]
+    csv_data = "\n".join(lines)
+    df = pd.read_csv(StringIO(csv_data))
 
-    if symbol not in ex.symbols:
-        alt = symbol.replace("/", ":")
-        if alt in ex.symbols:
-            symbol = alt
-        else:
-            sys.exit(f"[X] Symbol not found on {ex_id}: {symbol}")
-
-    try:
-        start_dt = dt.datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
-    except Exception:
-        sys.exit("[X] --start must be YYYY-MM-DD")
-    end_ms = None
-    if args.end:
-        try:
-            end_dt = dt.datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=dt.timezone.utc)
-            end_ms = ms(end_dt)
-        except Exception:
-            sys.exit("[X] --end must be YYYY-MM-DD")
-
-    since = ms(start_dt)
-    limit = args.limit
-
-    rows = []
-    print(f"[*] Fetching {ex_id} {symbol} {timeframe} from {args.start} ...")
-    while True:
-        try:
-            ohlcv = ex.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
-        except ccxt.RateLimitExceeded:
-            time.sleep(ex.rateLimit / 1000.0 + 0.5); continue
-        except Exception as e:
-            print(f"[!] fetch_ohlcv error: {e}. Retrying in 1s ...", file=sys.stderr)
-            time.sleep(1.0); continue
-
-        if not ohlcv:
+    # 标准化列名
+    cols_map = {c.lower().strip(): c for c in df.columns}
+    for name in ["date", "open", "high", "low", "close"]:
+        if name not in cols_map:
+            raise SystemExit(f"[X] Missing column: {name}")
+    vol_col = None
+    for cand in ["volume usdt", "volumeusd", "volume"]:
+        if cand in cols_map:
+            vol_col = cols_map[cand]
             break
+    if not vol_col:
+        raise SystemExit("[X] Missing volume column")
 
-        for t, o, h, l, c, v in ohlcv:
-            if end_ms and t >= end_ms:
-                break
-            rows.append((iso(t), o, h, l, c, v))
+    df = df.rename(columns={
+        cols_map["date"]: "datetime",
+        cols_map["open"]: "open",
+        cols_map["high"]: "high",
+        cols_map["low"]: "low",
+        cols_map["close"]: "close",
+        vol_col: "volume"
+    })
 
-        last_ts = ohlcv[-1][0]
-        next_since = last_ts + 1
-        if end_ms and next_since >= end_ms:
-            break
-        if next_since == since:
-            break
-        since = next_since
-
-        if len(ohlcv) < limit:
-            if not end_ms or since >= (end_ms or since):
-                break
-
-    if not rows:
-        sys.exit("[!] No data fetched. Check symbol/timeframe/start.")
-
-    df = pd.DataFrame(rows, columns=["datetime","open","high","low","close","volume"])
-    for col in ["open","high","low","close","volume"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna().reset_index(drop=True)
-    df.to_csv(args.out, index=False)
-    print(f"[\u2713] Saved -> {args.out}  rows={len(df)}")
+    # CryptoDataDownload 数据时间是降序的（最新在上）
+    df = df.iloc[::-1].reset_index(drop=True)
+    df = df[["datetime", "open", "high", "low", "close", "volume"]]
+    df.to_csv(args.out, index=False, encoding="utf-8")
+    print(f"[✓] Saved -> {args.out}  rows={len(df)}")
 
 if __name__ == "__main__":
     main()
