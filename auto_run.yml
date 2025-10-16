@@ -1,0 +1,72 @@
+name: Auto Crypto CSI Analysis (Multi-symbol)
+
+on:
+  schedule:
+    - cron: '0 */4 * * *'   # 每4小时执行一次（UTC），即北京时间 0, 4, 8, 12, 16, 20 点
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas matplotlib numpy requests pyyaml ccxt
+
+      - name: Run all symbols
+        run: |
+          python - <<'PYCODE'
+          import yaml, os, subprocess
+
+          with open("config.yaml") as f:
+              cfg = yaml.safe_load(f)
+
+          os.makedirs("data", exist_ok=True)
+
+          for sym in cfg["symbols"]:
+              name = sym["name"]
+              tf = sym["timeframe"]
+              start = sym["start"]
+              print(f"=== Processing {name} ({tf}) ===")
+
+              csv_out = f"data/Binance_{name}_{tf}_{start}_to_latest.csv"
+              subprocess.run([
+                  "python", "crypto_cdd_fetcher.py",
+                  "--symbol", name, "--freq", tf, "--start", start, "--out", csv_out
+              ], check=True)
+
+              subprocess.run([
+                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py", csv_out,
+                  "--window_strength", str(cfg["analysis"]["window_strength"]),
+                  "--window_zone", str(cfg["analysis"]["window_zone"]),
+                  "--bins_pct", str(cfg["analysis"]["bins_pct"]),
+                  "--beta", str(cfg["analysis"]["beta"]),
+                  "--half_life", str(cfg["analysis"]["half_life"]),
+                  "--quantile", str(cfg["analysis"]["quantile"]),
+                  "--ma_period", str(cfg["analysis"]["ma_period"]),
+                  "--smooth", str(cfg["analysis"]["smooth"])
+              ], check=True)
+
+          os.makedirs("docs", exist_ok=True)
+          for f in os.listdir("data"):
+              if f.endswith((".csv", ".png")):
+                  os.system(f"cp data/{f} docs/")
+
+          PYCODE
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add docs/*
+          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
+          git push
