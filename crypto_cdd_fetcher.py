@@ -8,6 +8,7 @@ Compatible with Binance 1h / 4h / 1d data.
 """
 
 import argparse
+import re
 import pandas as pd
 import requests
 from io import StringIO
@@ -26,6 +27,21 @@ def build_url(symbol: str, freq: str) -> str:
     if not freq.endswith(("h", "d")):
         raise ValueError("Unsupported freq: must be one of 1h, 4h, 1d")
     return f"{base}/Binance_{sym}_{freq}.csv"
+
+# --- robust datetime cleaner ---
+_dt_frac_re = re.compile(r"(\.\d+)(?=$)")  # strip trailing .### at end
+def clean_datetime_str(x: str) -> str:
+    s = str(x).strip()
+    # unify separators
+    s = s.replace("T", " ").replace("Z", "")
+    # remove trailing fractional seconds like .000, .800, .123456
+    s = _dt_frac_re.sub("", s)
+    # if only date provided, append 00:00:00
+    if len(s) == 10 and re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+        s = s + " 00:00:00"
+    # if format like YYYY/MM/DD, normalize to YYYY-MM-DD
+    s = s.replace("/", "-")
+    return s
 
 def main():
     args = parse_args()
@@ -54,12 +70,15 @@ def main():
 
     # Normalize column names
     cols = {c.lower().strip(): c for c in df.columns}
-    date_col  = next((cols[k] for k in cols if "date" in k or "timestamp" in k), None)
+    date_col  = next((cols[k] for k in cols if "date" in k or "timestamp" in k or "datetime" in k), None)
     open_col  = next((cols[k] for k in cols if "open" in k), None)
     high_col  = next((cols[k] for k in cols if "high" in k), None)
     low_col   = next((cols[k] for k in cols if "low" in k), None)
     close_col = next((cols[k] for k in cols if "close" in k), None)
-    vol_col   = next((cols[k] for k in cols if "volume usdt" in k or ("volume" in k and "btc" not in k)), None)
+    # prefer USDT volume; otherwise generic "volume" (but not BTC volume)
+    vol_col   = next((cols[k] for k in cols if "volume usdt" in k), None)
+    if vol_col is None:
+        vol_col = next((cols[k] for k in cols if ("volume" in k and "btc" not in k)), None)
 
     if not all([date_col, open_col, high_col, low_col, close_col, vol_col]):
         raise SystemExit(f"[X] Missing required columns. Found: {list(df.columns)}")
@@ -73,16 +92,18 @@ def main():
         vol_col: "volume"
     })
 
-    # 🔧 Fix: remove milliseconds like ".000" to ensure datetime is parseable
-    df["datetime"] = (
-        df["datetime"].astype(str)
-        .str.replace(".000", "", regex=False)
-        .str.strip()
-    )
+    # 🔧 key fix: normalize datetime strings (remove any fractional seconds like .000/.800/.123456)
+    df["datetime"] = df["datetime"].astype(str).map(clean_datetime_str)
 
-    # Sort ascending and save
+    # sort ascending and keep standard columns
     df = df.iloc[::-1].reset_index(drop=True)
     df = df[["datetime", "open", "high", "low", "close", "volume"]]
+
+    # enforce numeric on OHLCV to avoid dtype issues
+    for c in ["open", "high", "low", "close", "volume"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+
     df.to_csv(args.out, index=False, encoding="utf-8")
     print(f"[✓] Saved -> {args.out}  rows={len(df)}")
 
