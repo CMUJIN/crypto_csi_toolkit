@@ -1,10 +1,9 @@
 name: Auto Crypto CSI Analysis
 
 on:
+  workflow_dispatch:        # ✅ 手动运行入口（必需在最上面）
   schedule:
-    # 每 4 小时执行一次
-    - cron: "0 */4 * * *"
-  workflow_dispatch:
+    - cron: "0 */4 * * *"   # ✅ 每 4 小时执行一次
 
 jobs:
   run-analysis:
@@ -22,7 +21,7 @@ jobs:
       - name: 📦 Install dependencies
         run: |
           pip install -r requirements.txt || true
-          pip install pandas numpy matplotlib requests openpyxl notion-client
+          pip install pandas numpy matplotlib requests openpyxl notion-client pyyaml
 
       - name: 🕒 Run Crypto CSI Analysis
         run: |
