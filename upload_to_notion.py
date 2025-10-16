@@ -38,7 +38,6 @@ def clear_old_blocks(page_id):
 
 
 def parse_csv_to_table(csv_path: Path, max_rows=10):
-    """将 CSV 转为 Notion 表格格式"""
     with open(csv_path, newline='', encoding='utf-8') as f:
         reader = list(csv.reader(f))
         headers = reader[0]
@@ -62,7 +61,7 @@ def add_visual_report(page_id, symbol, png_url, csv_path, csv_url):
                 "cells": [[{"type": "text", "text": {"content": h}}] for h in headers]
             },
         })
-        # data rows
+        # data
         for row in rows:
             table_rows.append({
                 "object": "block",
@@ -93,7 +92,7 @@ def add_visual_report(page_id, symbol, png_url, csv_path, csv_url):
                     "has_column_header": True,
                     "has_row_header": False,
                     "table_width": len(headers),
-                    "children": table_rows,  # ✅ 一次性附带表格行
+                    "children": table_rows,
                 },
             },
             {
@@ -101,14 +100,20 @@ def add_visual_report(page_id, symbol, png_url, csv_path, csv_url):
                 "type": "paragraph",
                 "paragraph": {
                     "rich_text": [
-                        {"type": "text", "text": {"content": "📎 查看完整CSV文件：", "annotations": {"bold": True}}},
-                        {"type": "text", "text": {"content": csv_url, "link": {"url": csv_url}}},
+                        {
+                            "type": "text",
+                            "text": {"content": "📎 查看完整CSV文件："},
+                            "annotations": {"bold": True},  # ✅ 正确放在 rich_text 层级
+                        },
+                        {
+                            "type": "text",
+                            "text": {"content": csv_url, "link": {"url": csv_url}},
+                        },
                     ]
                 },
             },
         ]
 
-        # 一次性写入所有块
         notion.blocks.children.append(page_id, children=blocks)
         print(f"[OK] Added table report for {symbol}")
 
