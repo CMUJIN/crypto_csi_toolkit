@@ -1,87 +1,95 @@
 name: Auto Crypto CSI Analysis
 
 on:
-  schedule:
-    # 每 4 小时执行一次
-    - cron: "0 */4 * * *"
   workflow_dispatch:
+  schedule:
+    - cron: '0 */4 * * *'
+
+permissions:
+  contents: write
 
 jobs:
-  run-analysis:
+  run:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt || true
-          pip install pandas numpy matplotlib requests openpyxl notion-client pyyaml
+          python -m pip install --upgrade pip
+          pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
 
-      - name: Run Crypto CSI Analysis
+      - name: Create analysis runner
         run: |
-          echo "=== Start CSI Auto Analysis ==="
-          python - <<'PYCODE'
-import subprocess, yaml
-from pathlib import Path
+          cat > run_analysis.py << 'PY'
+          import subprocess, yaml
+          from pathlib import Path
 
-# === Load config.yaml ===
-config_path = Path("config.yaml")
-if not config_path.exists():
-    raise FileNotFoundError("Missing config.yaml")
+          cfg_path = Path("config.yaml")
+          if not cfg_path.exists():
+              raise FileNotFoundError("Missing config.yaml")
 
-config = yaml.safe_load(open(config_path))
+          cfg = yaml.safe_load(cfg_path.read_text())
+          symbols = cfg.get("symbols", [])
+          analysis = cfg.get("analysis", {})
 
-for item in config.get("symbols", []):
-    symbol = item["name"]
-    freq = item.get("timeframe", "1h")
-    start = item.get("start", "2025-08-01")
-    print(f"=== Processing {symbol} ({freq}) ===")
+          for item in symbols:
+              symbol = item.get("symbol") or item.get("name")
+              freq = item.get("freq") or item.get("timeframe") or "1h"
+              start = str(item.get("start", "2025-08-01"))
 
-    subprocess.run([
-        "python", "crypto_cdd_fetcher.py",
-        "--symbol", symbol,
-        "--freq", freq,
-        "--start", start,
-        "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
-    ], check=True)
+              if not symbol:
+                  raise ValueError(f"Invalid entry in config.yaml: {item}")
 
-    subprocess.run([
-        "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
-        f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
-        "--window_strength", str(config["analysis"]["window_strength"]),
-        "--window_zone", str(config["analysis"]["window_zone"]),
-        "--bins_pct", str(config["analysis"]["bins_pct"]),
-        "--beta", str(config["analysis"]["beta"]),
-        "--half_life", str(config["analysis"]["half_life"]),
-        "--quantile", str(config["analysis"]["quantile"]),
-        "--ma_period", str(config["analysis"]["ma_period"]),
-        "--smooth", str(config["analysis"]["smooth"]),
-    ], check=True)
+              print(f"=== Processing {symbol} ({freq}) ===")
 
-    print(f"[OK] Finished {symbol} ({freq}) analysis successfully.")
-PYCODE
+              subprocess.run([
+                  "python", "crypto_cdd_fetcher.py",
+                  "--symbol", symbol,
+                  "--freq", freq,
+                  "--start", start,
+                  "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
+              ], check=True)
 
-      - name: Copy analysis results to docs/
+              subprocess.run([
+                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
+                  f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
+                  "--window_strength", str(analysis.get("window_strength", 5)),
+                  "--window_zone", str(analysis.get("window_zone", 60)),
+                  "--bins_pct", str(analysis.get("bins_pct", 1)),
+                  "--beta", str(analysis.get("beta", 0.7)),
+                  "--half_life", str(analysis.get("half_life", 10000000)),
+                  "--quantile", str(analysis.get("quantile", 0.8)),
+                  "--ma_period", str(analysis.get("ma_period", 10)),
+                  "--smooth", str(analysis.get("smooth", 3))
+              ], check=True)
+
+              print(f"[OK] Finished {symbol} ({freq}) analysis successfully.")
+          PY
+
+      - name: Run analysis
         run: |
-          echo "[INFO] Copying analysis results to docs/..."
+          mkdir -p data docs
+          python run_analysis.py
+
+      - name: Sync results to docs
+        run: |
           mkdir -p docs
           cp -r data/* docs/ || true
-          ls -lh docs/
+          ls -lh docs/ || true
 
       - name: Commit and push results
         run: |
-          echo "[INFO] Commit results..."
           git config --global user.email "actions@github.com"
           git config --global user.name "github-actions"
           git add docs/
-          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
+          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
           git push || echo "No permission to push"
 
       - name: Upload results to Notion
