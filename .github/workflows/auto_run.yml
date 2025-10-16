@@ -96,5 +96,7 @@ jobs:
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_SUMMARY_PAGE_ID: ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
         run: |
           python upload_to_notion.py
+
