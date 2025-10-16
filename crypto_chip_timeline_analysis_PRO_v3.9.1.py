@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Chip Timeline Analysis (v3.9.4)
+Crypto Chip Timeline Analysis (v3.9.5)
 --------------------------------------
-✓ Filter bins by quantile threshold
-✓ Restore long/short absorption curves
-✓ Annotate chip zones (strength)
-✓ Keep auto date filtering & flexible columns
-✓ Auto y-axis scaling
+✓ 修复 tz-naive vs tz-aware datetime 报错
+✓ 保留筹码密集区过滤逻辑 (quantile)
+✓ 恢复多空吸筹曲线
+✓ 恢复 strength 区间标注
+✓ 自动纵坐标范围 (不从0开始)
 """
 
 import argparse, sys, re, os
@@ -16,10 +16,11 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
 
-# -------------------------------
-# Helpers
-# -------------------------------
+# ==============================
+# Utility Functions
+# ==============================
 def fmt_price(v: float) -> str:
+    """格式化价格显示（整数或两位小数）"""
     return f"{int(round(v))}" if v >= 100 else f"{v:.2f}"
 
 
@@ -27,9 +28,6 @@ def rolling_zscore(series, window):
     return (series - series.rolling(window).mean()) / (series.rolling(window).std() + 1e-9)
 
 
-# -------------------------------
-# Volume weighting & chip zones
-# -------------------------------
 def exp_decay_weights(length: int, half_life: float):
     idx = np.arange(length, dtype=float)
     age = (length - 1) - idx
@@ -44,6 +42,9 @@ def compute_effective_volume(vol: np.ndarray, beta: float, half_life: float):
     return vol * mix
 
 
+# ==============================
+# Core Computation
+# ==============================
 def compute_bins(prices, eff_vol, bin_pct):
     pmin, pmax = float(np.nanmin(prices)), float(np.nanmax(prices))
     width = bin_pct / 100.0
@@ -55,9 +56,6 @@ def compute_bins(prices, eff_vol, bin_pct):
     return pd.DataFrame({"low": bins[:-1], "high": bins[1:], "strength": vol_sum})
 
 
-# -------------------------------
-# Long/Short absorption
-# -------------------------------
 def compute_long_short(close, eff_vol, window_strength, smooth, window_zone):
     close = close.astype(float)
     ret = close.pct_change().fillna(0)
@@ -72,12 +70,12 @@ def compute_long_short(close, eff_vol, window_strength, smooth, window_zone):
     return norm(long_raw), norm(short_raw)
 
 
-# -------------------------------
-# Plotting
-# -------------------------------
+# ==============================
+# Visualization
+# ==============================
 def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_curve):
     df = df.dropna(subset=["datetime"]).sort_values("datetime")
-    t = pd.to_datetime(df["datetime"])
+    t = pd.to_datetime(df["datetime"], utc=True, errors="coerce")
     price = df["close"].astype(float)
     volume = df["volume"].astype(float)
 
@@ -85,7 +83,7 @@ def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_c
     gs = fig.add_gridspec(2, 1, height_ratios=[3, 1.4], hspace=0.15)
     ax = fig.add_subplot(gs[0, 0]); ax2 = ax.twinx()
 
-    # --- Main price ---
+    # --- Price line ---
     ax.plot(t, price, color="black", linewidth=1.2, label="price")
     ax.set_ylabel("price")
     ax2.set_ylabel("strength")
@@ -97,10 +95,11 @@ def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_c
         if r["strength"] >= threshold:
             ax.axhspan(r["low"], r["high"], color=(1.0, 0.65, 0.0, 0.25))
             y_mid = (r["low"] + r["high"]) / 2.0
-            label = f"{fmt_price(r['low'])}–{fmt_price(r['high'])}  strength:{r['strength']:.2f}"
+            label = f"{fmt_price(r['low'])}-{fmt_price(r['high'])}  strength:{r['strength']:.2f}"
             if not any(abs(y_mid - yy) < (price.max() - price.min()) * 0.01 for yy in used_y):
                 ax.text(t.iloc[0], y_mid, label, fontsize=8, color="saddlebrown",
-                        bbox=dict(facecolor=(1, 0.9, 0.8, 0.7), edgecolor="none", boxstyle="round,pad=0.2"))
+                        bbox=dict(facecolor=(1, 0.9, 0.8, 0.7),
+                                  edgecolor="none", boxstyle="round,pad=0.2"))
                 used_y.append(y_mid)
 
     # --- Long/Short curves ---
@@ -134,9 +133,9 @@ def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_c
     print(f"[OK] Saved timeline figure -> {out_png}")
 
 
-# -------------------------------
+# ==============================
 # Main
-# -------------------------------
+# ==============================
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("csv", help="CSV file")
@@ -163,11 +162,11 @@ def main():
                 rename_map[c] = target; break
     df = df.rename(columns=rename_map)
 
-    # Auto date filter from filename
+    # --- Auto date filter from filename (tz-safe) ---
     m = re.search(r'_(\d{4}-\d{2}-\d{2})_to_', args.csv)
     if m:
-        start_dt = pd.to_datetime(m.group(1))
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce")
+        start_dt = pd.to_datetime(m.group(1), utc=True)
+        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
         df = df[df["datetime"] >= start_dt]
         print(f"[*] Filtered data from {start_dt.strftime('%Y-%m-%d')} onward, rows={len(df)}")
 
