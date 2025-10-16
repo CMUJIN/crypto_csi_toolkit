@@ -1,0 +1,20 @@
+symbols:
+  - name: ETHUSDT
+    start: 2025-08-01
+    timeframe: 1h
+  - name: BTCUSDT
+    start: 2025-08-01
+    timeframe: 1h
+  - name: UNIUSDT
+    start: 2025-08-01
+    timeframe: 4h
+
+analysis:
+  window_strength: 5
+  window_zone: 60
+  bins_pct: 0.5
+  beta: 0.7
+  half_life: 10000000
+  quantile: 0.8
+  ma_period: 10
+  smooth: 3
