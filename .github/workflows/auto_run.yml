@@ -1,79 +1,82 @@
-name: Auto Crypto CSI Analysis (Multi-symbol)
+name: Auto Crypto CSI Analysis
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    # 每 4 小时执行一次
+    - cron: "0 */4 * * *"
   workflow_dispatch:
 
 jobs:
-  run:
+  run-analysis:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
 
     steps:
-      - name: Checkout repository
+      - name: 🔹 Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: 📦 Install dependencies
         run: |
-          pip install pandas matplotlib numpy requests pyyaml ccxt
+          pip install -r requirements.txt || true
+          pip install pandas numpy matplotlib requests openpyxl notion-client
 
-      - name: Run all symbols
+      - name: 🕒 Run Crypto CSI Analysis
         run: |
+          echo "=== Start CSI Auto Analysis ==="
           python - <<'PYCODE'
-          import yaml, os, subprocess
+import subprocess, yaml, datetime
+from pathlib import Path
 
-          with open("config.yaml") as f:
-              cfg = yaml.safe_load(f)
+# === Load config.yaml ===
+config_path = Path("config.yaml")
+if not config_path.exists():
+    raise FileNotFoundError("Missing config.yaml")
 
-          os.makedirs("data", exist_ok=True)
+config = yaml.safe_load(open(config_path))
 
-          for sym in cfg["symbols"]:
-              name = str(sym["name"])
-              tf = str(sym["timeframe"])
-              start = str(sym["start"])
-              print(f"=== Processing {name} ({tf}) ===")
+for item in config.get("symbols", []):
+    symbol = item["symbol"]
+    freq = item.get("freq", "1h")
+    start = item.get("start", "2025-08-01")
+    print(f"=== Processing {symbol} ({freq}) ===")
+    subprocess.run([
+        "python", "crypto_cdd_fetcher.py",
+        "--symbol", symbol,
+        "--freq", freq,
+        "--start", start,
+        "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
+    ], check=True)
+    subprocess.run([
+        "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
+        f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
+        "--window_strength", "5",
+        "--window_zone", "60",
+        "--bins_pct", "0.5",
+        "--beta", "0.7",
+        "--half_life", "10000000",
+        "--quantile", "0.8",
+        "--ma_period", "10",
+        "--smooth", "3"
+    ], check=True)
+PYCODE
 
-              csv_out = f"data/Binance_{name}_{tf}_{start}_to_latest.csv"
-
-              subprocess.run([
-                  "python", "crypto_cdd_fetcher.py",
-                  "--symbol", name,
-                  "--freq", tf,
-                  "--out", csv_out
-              ], check=True)
-
-
-              subprocess.run([
-                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py", csv_out,
-                  "--window_strength", str(cfg["analysis"]["window_strength"]),
-                  "--window_zone", str(cfg["analysis"]["window_zone"]),
-                  "--bins_pct", str(cfg["analysis"]["bins_pct"]),
-                  "--beta", str(cfg["analysis"]["beta"]),
-                  "--half_life", str(cfg["analysis"]["half_life"]),
-                  "--quantile", str(cfg["analysis"]["quantile"]),
-                  "--ma_period", str(cfg["analysis"]["ma_period"]),
-                  "--smooth", str(cfg["analysis"]["smooth"])
-              ], check=True)
-
-          os.makedirs("docs", exist_ok=True)
-          for f in os.listdir("data"):
-              if f.endswith((".csv", ".png")):
-                  os.system(f"cp data/{f} docs/")
-
-          PYCODE
-
-      - name: Commit results
+      - name: 📤 Commit and push results
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git add docs/*
-          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
-          git push
+          echo "[INFO] Commit results..."
+          git config --global user.email "actions@github.com"
+          git config --global user.name "github-actions"
+          git add docs/
+          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
+          git push || echo "No permission to push"
+
+      - name: 📤 Upload results to Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          pip install notion-client
+          python upload_to_notion.py
