@@ -3,7 +3,8 @@
 crypto_cdd_fetcher.py
 -------------------------------------
 Fetch static OHLCV CSVs from CryptoDataDownload (CDD).
-Supports Binance 1h / 4h / 1d files, outputs standardized ascending CSV.
+Automatically skips comments and non-tabular lines.
+Compatible with Binance 1h / 4h / 1d data.
 """
 
 import argparse
@@ -35,27 +36,33 @@ def main():
     if resp.status_code != 200:
         raise SystemExit(f"[X] Download failed: HTTP {resp.status_code}")
 
-    # Clean text and skip comments
-    lines = [ln for ln in resp.text.splitlines() if ln.strip() and not ln.startswith("#")]
-    csv_data = "\n".join(lines)
+    # Filter out comment lines and junk headers
+    lines = []
+    started = False
+    for ln in resp.text.splitlines():
+        if ln.strip().startswith("#") or not ln.strip():
+            continue
+        # Detect real header row (contains "Date" and "Open")
+        if "Date" in ln and "Open" in ln:
+            started = True
+        if started:
+            lines.append(ln)
+    if not lines:
+        raise SystemExit("[X] No valid CSV content detected in response.")
 
-    df = pd.read_csv(StringIO(csv_data), low_memory=False)
+    df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
 
-    # Normalize column names (case-insensitive)
+    # Normalize column names
     cols = {c.lower().strip(): c for c in df.columns}
+    date_col = next((cols[k] for k in cols if "date" in k or "timestamp" in k), None)
+    open_col = next((cols[k] for k in cols if "open" == k or " open" in k), None)
+    high_col = next((cols[k] for k in cols if "high" == k), None)
+    low_col = next((cols[k] for k in cols if "low" == k), None)
+    close_col = next((cols[k] for k in cols if "close" == k), None)
+    vol_col = next((cols[k] for k in cols if "volume usdt" in k or "volume" == k), None)
 
-    # Detect essential columns
-    date_col = next((cols[k] for k in cols if k in ["date", "timestamp", "datetime"]), None)
-    open_col = next((cols[k] for k in cols if "open" in k), None)
-    high_col = next((cols[k] for k in cols if "high" in k), None)
-    low_col  = next((cols[k] for k in cols if "low" in k), None)
-    close_col= next((cols[k] for k in cols if "close" in k), None)
-    vol_col  = next((cols[k] for k in cols if "volume" in k and "btc" not in k), None)
-
-    if not date_col:
-        raise SystemExit(f"[X] No date/timestamp column found: {list(df.columns)}")
-    if not vol_col:
-        raise SystemExit("[X] Missing volume column")
+    if not all([date_col, open_col, high_col, low_col, close_col, vol_col]):
+        raise SystemExit(f"[X] Missing required columns. Found: {list(df.columns)}")
 
     df = df.rename(columns={
         date_col: "datetime",
@@ -66,7 +73,6 @@ def main():
         vol_col: "volume"
     })
 
-    # Sort ascending
     df = df.iloc[::-1].reset_index(drop=True)
     df = df[["datetime", "open", "high", "low", "close", "volume"]]
     df.to_csv(args.out, index=False, encoding="utf-8")
