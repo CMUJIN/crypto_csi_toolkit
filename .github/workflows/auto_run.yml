@@ -42,12 +42,11 @@ jobs:
 
               subprocess.run([
                   "python", "crypto_cdd_fetcher.py",
-                  "--exchange", "binance",
                   "--symbol", name,
                   "--freq", tf,
-                  "--start", start,
                   "--out", csv_out
               ], check=True)
+
 
               subprocess.run([
                   "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py", csv_out,
