@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Chip Timeline Analysis (v3.9.5)
+Crypto Chip Timeline Analysis (v3.9.2)
 --------------------------------------
-✓ 修复 tz-naive vs tz-aware datetime 报错
+在 v3.9.1 稳定版基础上，仅替换分箱逻辑为“每个价格点 ± bins_pct% 的动态筹码带”，
+并对重叠区间进行聚合与强度归一化。其余功能、参数与输出保持一致：
+
+✓ 修复 tz-naive vs tz-aware datetime 报错（沿用 v3.9.1）
 ✓ 保留筹码密集区过滤逻辑 (quantile)
-✓ 恢复多空吸筹曲线
-✓ 恢复 strength 区间标注
+✓ 保留多空吸筹曲线
+✓ 保留 strength 区间标注与数值格式
 ✓ 自动纵坐标范围 (不从0开始)
 """
 
@@ -46,14 +49,55 @@ def compute_effective_volume(vol: np.ndarray, beta: float, half_life: float):
 # Core Computation
 # ==============================
 def compute_bins(prices, eff_vol, bin_pct):
-    pmin, pmax = float(np.nanmin(prices)), float(np.nanmax(prices))
-    width = bin_pct / 100.0
-    n_bins = int(np.clip(np.ceil((pmax - pmin) / (pmin * width)), 30, 600))
-    bins = np.linspace(pmin, pmax, n_bins + 1)
-    idx = np.clip(np.digitize(prices, bins) - 1, 0, n_bins - 1)
-    vol_sum = np.bincount(idx, weights=eff_vol, minlength=n_bins).astype(float)
-    vol_sum /= (vol_sum.max() or 1.0)
-    return pd.DataFrame({"low": bins[:-1], "high": bins[1:], "strength": vol_sum})
+    """
+    动态筹码带计算：
+      - 对每个收盘价 p，构造区间 [p*(1 - bin_pct%), p*(1 + bin_pct%)]
+      - 以有效成交量 eff_vol 作为该微带的强度贡献
+      - 将按价格排序后的重叠区间合并，强度累加
+      - 最后对强度做 0..1 归一化，返回 {low, high, strength}
+    说明：
+      - 由于相邻/重叠微带会被合并，最终区间的总宽度可能 ≥ 2*bin_pct%，
+        但**每一条带**的“基本宽度尺度”严格来源于 bin_pct。
+    """
+    prices = np.asarray(prices, dtype=float)
+    w = np.asarray(eff_vol, dtype=float)
+    if len(prices) == 0:
+        return pd.DataFrame(columns=["low", "high", "strength"])
+
+    # 构造原始微带
+    pct = float(bin_pct) / 100.0
+    lows = prices * (1.0 - pct)
+    highs = prices * (1.0 + pct)
+    strengths = w.copy()
+
+    # 按 low 排序，准备线性合并
+    order = np.argsort(lows)
+    lows = lows[order]
+    highs = highs[order]
+    strengths = strengths[order]
+
+    merged = []
+    cur_low, cur_high, cur_strength = lows[0], highs[0], strengths[0]
+
+    for i in range(1, len(lows)):
+        low_i, high_i, s_i = lows[i], highs[i], strengths[i]
+        # 有重叠/相接则合并（这里允许贴边相接）
+        if low_i <= cur_high:
+            cur_high = max(cur_high, high_i)
+            cur_strength += s_i          # 强度累加（反映密集度）
+        else:
+            merged.append([cur_low, cur_high, cur_strength])
+            cur_low, cur_high, cur_strength = low_i, high_i, s_i
+
+    merged.append([cur_low, cur_high, cur_strength])
+
+    zones_df = pd.DataFrame(merged, columns=["low", "high", "strength"])
+    # 归一化到 0..1
+    m = zones_df["strength"].max()
+    zones_df["strength"] = zones_df["strength"] / (m if m else 1.0)
+    # 从强到弱排序（后续用 quantile 过滤）
+    zones_df = zones_df.sort_values("strength", ascending=False).reset_index(drop=True)
+    return zones_df
 
 
 def compute_long_short(close, eff_vol, window_strength, smooth, window_zone):
@@ -89,7 +133,7 @@ def draw_timeline(df, bins_df, out_png, ma_period, quantile, long_curve, short_c
     ax2.set_ylabel("strength")
 
     # --- Chip zones filtering by quantile ---
-    threshold = bins_df["strength"].quantile(quantile)
+    threshold = bins_df["strength"].quantile(quantile) if len(bins_df) else 1.1
     used_y = []
     for _, r in bins_df.iterrows():
         if r["strength"] >= threshold:
@@ -141,7 +185,7 @@ def main():
     ap.add_argument("csv", help="CSV file")
     ap.add_argument("--window_strength", type=int, default=5)
     ap.add_argument("--window_zone", type=int, default=60)
-    ap.add_argument("--bins_pct", type=float, default=0.5)
+    ap.add_argument("--bins_pct", type=float, default=0.5)   # 仍保持默认 0.5%，可在 config.yaml 配置为 2
     ap.add_argument("--beta", type=float, default=0.7)
     ap.add_argument("--half_life", type=float, default=10000000)
     ap.add_argument("--quantile", type=float, default=0.8)
@@ -175,7 +219,10 @@ def main():
             sys.exit(f"[X] Missing column: {col}")
 
     eff_vol = compute_effective_volume(df["volume"].values, beta=args.beta, half_life=args.half_life)
+
+    # === 新的动态筹码带 ===
     bins_df = compute_bins(df["close"].values, eff_vol, args.bins_pct)
+
     long_curve, short_curve = compute_long_short(df["close"], eff_vol,
                                                  args.window_strength, args.smooth, args.window_zone)
 
