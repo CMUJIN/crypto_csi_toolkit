@@ -2,6 +2,7 @@ import os
 from notion_client import Client
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
@@ -9,10 +10,12 @@ DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 notion = Client(auth=NOTION_TOKEN)
 repo_url_base = "https://cmujin.github.io/crypto_csi_toolkit"
 
+
 def notion_url(path: str) -> str:
     """Generate GitHub Pages URL with timestamp to avoid cache"""
     ts = int(datetime.now().timestamp())
     return f"{repo_url_base}/{path}?ver={ts}"
+
 
 def find_page_id_by_symbol(symbol: str):
     """Find Notion page id by Name"""
@@ -27,37 +30,74 @@ def find_page_id_by_symbol(symbol: str):
         return results[0]["id"]
     return None
 
+
 def clear_old_blocks(page_id):
-    """Clear old blocks under the page (optional cleanup to avoid stacking images)"""
-    children = notion.blocks.children.list(page_id)
-    for child in children.get("results", []):
-        notion.blocks.delete(child["id"])
+    """Clear old content blocks under page (if any)"""
+    try:
+        children = notion.blocks.children.list(page_id)
+        for child in children.get("results", []):
+            notion.blocks.delete(child["id"])
+        print(f"[~] Cleared old blocks for page {page_id}")
+    except Exception as e:
+        print(f"[!] Warning: Could not clear old blocks ({e})")
+
 
 def add_visual_blocks(page_id, png_url, csv_url):
-    """Insert visual content blocks under the page"""
-    blocks = [
-        {
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "Latest Chart"}}]},
-        },
-        {
-            "object": "block",
-            "type": "image",
-            "image": {"type": "external", "external": {"url": png_url}},
-        },
-        {
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {"rich_text": [{"type": "text", "text": {"content": "CSV Data"}}]},
-        },
-        {
-            "object": "block",
-            "type": "embed",
-            "embed": {"url": csv_url},
-        },
-    ]
-    notion.blocks.children.append(page_id, children=blocks)
+    """Insert grouped visual content into page"""
+    try:
+        # Step 1. Create a parent "📊 Content" toggle block
+        content_block = notion.blocks.children.append(
+            page_id,
+            children=[
+                {
+                    "object": "block",
+                    "type": "toggle",
+                    "toggle": {
+                        "rich_text": [{"type": "text", "text": {"content": "📊 Content"}}],
+                        "children": [],
+                    },
+                }
+            ],
+        )
+
+        parent_id = content_block["results"][0]["id"]
+        print(f"[OK] Created '📊 Content' block with ID: {parent_id}")
+
+        # Step 2. Add sub-blocks under Content
+        sub_blocks = [
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "Latest Chart"}}]
+                },
+            },
+            {
+                "object": "block",
+                "type": "image",
+                "image": {"type": "external", "external": {"url": png_url}},
+            },
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"type": "text", "text": {"content": "CSV Data"}}]
+                },
+            },
+            {
+                "object": "block",
+                "type": "embed",
+                "embed": {"url": csv_url},
+            },
+        ]
+
+        time.sleep(1)
+        notion.blocks.children.append(parent_id, children=sub_blocks)
+        print(f"[OK] Added PNG + CSV blocks under '📊 Content' for {page_id}")
+
+    except Exception as e:
+        print(f"[X] Failed to add visual blocks: {e}")
+
 
 def upload_to_notion():
     docs_dir = Path("docs")
@@ -79,8 +119,12 @@ def upload_to_notion():
                     "parent": {"database_id": DATABASE_ID},
                     "properties": {
                         "Name": {"title": [{"text": {"content": symbol}}]},
-                        "Timeframe": {"rich_text": [{"text": {"content": "1h"}}]},
-                        "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                        "Timeframe": {
+                            "rich_text": [{"text": {"content": "1h"}}]
+                        },
+                        "Updated": {
+                            "date": {"start": datetime.now(timezone.utc).isoformat()}
+                        },
                         "CSV": {"url": csv_url},
                         "Chart": {"url": png_url},
                     },
@@ -93,18 +137,21 @@ def upload_to_notion():
                 **{
                     "page_id": page_id,
                     "properties": {
-                        "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
+                        "Updated": {
+                            "date": {"start": datetime.now(timezone.utc).isoformat()}
+                        },
                         "CSV": {"url": csv_url},
                         "Chart": {"url": png_url},
                     },
                 }
             )
 
-        # 🧹 清理旧块并添加新图表/CSV嵌入
+        # 🧹 Clear old blocks + Insert new grouped content
         clear_old_blocks(page_id)
         add_visual_blocks(page_id, png_url, csv_url)
 
         print(f"[OK] Updated {symbol} | PNG={png_url} | CSV={csv_url}")
+
 
 if __name__ == "__main__":
     upload_to_notion()
