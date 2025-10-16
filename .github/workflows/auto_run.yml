@@ -2,8 +2,7 @@ name: Auto Crypto CSI Analysis
 
 on:
   schedule:
-    # 每 4 小时执行一次
-    - cron: "0 */4 * * *"
+    - cron: "0 */4 * * *"   # every 4 hours
   workflow_dispatch:
 
 jobs:
@@ -22,45 +21,61 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt || true
-          pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
+          pip install pandas numpy matplotlib requests pyyaml openpyxl notion-client
 
       - name: Run Crypto CSI Analysis
+        shell: bash
         run: |
           echo "=== Start CSI Auto Analysis ==="
           python - <<'PYCODE'
 import subprocess, yaml
 from pathlib import Path
 
-config_path = Path("config.yaml")
-config = yaml.safe_load(open(config_path))
+repo = Path(".").resolve()
+cfg_path = repo / "config.yaml"
+if not cfg_path.exists():
+    raise FileNotFoundError("Missing config.yaml")
 
-for item in config.get("symbols", []):
+cfg = yaml.safe_load(cfg_path.read_text())
+
+symbols = cfg.get("symbols", [])
+analysis = cfg.get("analysis", {}) or {}
+
+def run(cmd):
+    print(">>", " ".join(map(str, cmd)), flush=True)
+    subprocess.run(cmd, check=True)
+
+for item in symbols:
     symbol = item.get("name") or item.get("symbol")
-    freq = item.get("timeframe") or item.get("freq", "1h")
+    freq = item.get("timeframe") or item.get("freq") or "1h"
     start = str(item.get("start", "2025-08-01"))
 
     print(f"=== Processing {symbol} ({freq}) ===")
 
-    subprocess.run([
+    out_csv = f"docs/Binance_{symbol}_{freq}_{start}_to_latest.csv"
+
+    run([
         "python", "crypto_cdd_fetcher.py",
         "--symbol", symbol,
         "--freq", freq,
         "--start", start,
-        "--out", f"docs/Binance_{symbol}_{freq}_{start}_to_latest.csv"
-    ], check=True)
+        "--out", out_csv
+    ])
 
-    subprocess.run([
+    run([
         "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
-        f"docs/Binance_{symbol}_{freq}_{start}_to_latest.csv",
-        "--window_strength", "5",
-        "--window_zone", "60",
-        "--bins_pct", "0.5",
-        "--beta", "0.7",
-        "--half_life", "10000000",
-        "--quantile", "0.8",
-        "--ma_period", "10",
-        "--smooth", "3"
-    ], check=True)
+        out_csv,
+        "--window_strength", str(analysis.get("window_strength", 5)),
+        "--window_zone", str(analysis.get("window_zone", 60)),
+        "--bins_pct", str(analysis.get("bins_pct", 1)),
+        "--beta", str(analysis.get("beta", 0.7)),
+        "--half_life", str(analysis.get("half_life", 10000000)),
+        "--quantile", str(analysis.get("quantile", 0.8)),
+        "--ma_period", str(analysis.get("ma_period", 10)),
+        "--smooth", str(analysis.get("smooth", 3)),
+    ])
+
+    print(f"[OK] Finished {symbol} ({freq})")
 PYCODE
 
       - name: Commit and push results
