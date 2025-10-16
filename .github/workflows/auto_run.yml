@@ -2,7 +2,7 @@ name: Auto Crypto CSI Analysis (Multi-symbol)
 
 on:
   schedule:
-    - cron: '0 */4 * * *'   # 每4小时执行一次（UTC），即北京时间 0, 4, 8, 12, 16, 20 点
+    - cron: '0 */4 * * *'
   workflow_dispatch:
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
           for sym in cfg["symbols"]:
               name = sym["name"]
               tf = sym["timeframe"]
-              start = sym["start"]
+              start = str(sym["start"])  # ✅ 强制转字符串
               print(f"=== Processing {name} ({tf}) ===")
 
               csv_out = f"data/Binance_{name}_{tf}_{start}_to_latest.csv"
