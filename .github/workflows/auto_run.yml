@@ -33,15 +33,20 @@ jobs:
           os.makedirs("data", exist_ok=True)
 
           for sym in cfg["symbols"]:
-              name = sym["name"]
-              tf = sym["timeframe"]
-              start = str(sym["start"])  # ✅ 强制转字符串
+              name = str(sym["name"])
+              tf = str(sym["timeframe"])
+              start = str(sym["start"])
               print(f"=== Processing {name} ({tf}) ===")
 
               csv_out = f"data/Binance_{name}_{tf}_{start}_to_latest.csv"
+
               subprocess.run([
                   "python", "crypto_cdd_fetcher.py",
-                  "--symbol", name, "--freq", tf, "--start", start, "--out", csv_out
+                  "--exchange", "binance",
+                  "--symbol", name,
+                  "--freq", tf,
+                  "--start", start,
+                  "--out", csv_out
               ], check=True)
 
               subprocess.run([
