@@ -1,74 +1,90 @@
 # -*- coding: utf-8 -*-
 """
-upload_to_notion.py  (v2.4)
-将 Crypto CSI 分析结果（CSV + PNG）同步上传到 Notion 数据库。
-URL 采用 GitHub Pages 域名结构：
-  https://<username>.github.io/<repo>/<subdir>/<file>?ver=<timestamp>
+upload_to_notion_v2.6.py
+--------------------------------------
+同步最新分析结果至 Notion 数据库
+功能：
+- 自动上传 CSV 和 PNG 文件的公开链接（GitHub Pages）
+- 自动更新时间戳防缓存
+- 自动更新已有页或创建新页
 """
 
 import os
-import datetime
+import time
 from notion_client import Client
+from datetime import datetime, timezone
 
-# === 环境变量 ===
+# === 配置区 ===
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
+BASE_URL = "https://cmujin.github.io/crypto_csi_toolkit"  # GitHub Pages 根目录
 
 notion = Client(auth=NOTION_TOKEN)
 
-# === GitHub Pages 配置 ===
-USERNAME = "CMUJIN"
-REPO = "crypto_csi_toolkit"
-SUBDIR = "data"  # GitHub Pages 对应 docs/data/ 目录
-BASE_URL = f"https://{USERNAME}.github.io/{REPO}/{SUBDIR}"
 
-def find_page_id_by_symbol(symbol):
-    """查找数据库中对应 symbol 的页面 ID"""
+# === 查找 Notion 页面 ===
+def find_page_id_by_name(name):
     query = notion.databases.query(
-        database_id=NOTION_DATABASE_ID,
-        filter={"property": "Name", "title": {"equals": symbol}}
+        **{
+            "database_id": DATABASE_ID,
+            "filter": {"property": "Name", "title": {"equals": name}},
+        }
     )
     results = query.get("results", [])
     return results[0]["id"] if results else None
 
 
+# === 创建或更新页面 ===
+def upsert_page(symbol, timeframe, csv_url, chart_url):
+    now_str = datetime.now(timezone.utc).isoformat()
+    page_id = find_page_id_by_name(symbol)
+
+    if page_id:
+        print(f"[~] Updating existing Notion page for {symbol} ...")
+        notion.pages.update(
+            page_id=page_id,
+            properties={
+                "Timeframe": {"rich_text": [{"text": {"content": timeframe}}]},
+                "Updated": {"date": {"start": now_str}},
+                "CSV": {"url": csv_url},
+                "Chart": {"url": chart_url},
+            },
+        )
+    else:
+        print(f"[+] Creating new Notion page for {symbol} ...")
+        notion.pages.create(
+            parent={"database_id": DATABASE_ID},
+            properties={
+                "Name": {"title": [{"text": {"content": symbol}}]},
+                "Timeframe": {"rich_text": [{"text": {"content": timeframe}}]},
+                "Updated": {"date": {"start": now_str}},
+                "CSV": {"url": csv_url},
+                "Chart": {"url": chart_url},
+            },
+        )
+
+
+# === 主执行函数 ===
 def upload_to_notion():
-    symbols = ["ETHUSDT", "BTCUSDT"]
-    timeframe = "1h"
+    print("[*] Starting Notion sync...")
+    timestamp = int(time.time())
 
-    for symbol in symbols:
-        print(f"[*] Syncing {symbol} to Notion...")
-        page_id = find_page_id_by_symbol(symbol)
+    for file in os.listdir("docs"):
+        if not file.endswith(".csv"):
+            continue
+        try:
+            symbol, freq, *_ = file.replace("Binance_", "").split("_")
+            csv_file = file
+            png_file = file.replace("_chip_strength.csv", "_chip_timeline_pro.png")
 
-        # === 构建文件名 ===
-        csv_filename = f"Binance_{symbol}_{timeframe}_2025-08-01_to_latest_chip_strength.csv"
-        png_filename = f"Binance_{symbol}_{timeframe}_2025-08-01_to_latest_chip_timeline_pro.png"
+            csv_path = f"{BASE_URL}/{csv_file}?ver={timestamp}"
+            png_path = f"{BASE_URL}/{png_file}?ver={timestamp}"
 
-        # === GitHub Pages URL + 时间戳 ===
-        ver = int(datetime.datetime.now().timestamp())
-        csv_url = f"{BASE_URL}/{csv_filename}?ver={ver}"
-        chart_url = f"{BASE_URL}/{png_filename}?ver={ver}"
-
-        # === 上传或更新 Notion 页面 ===
-        props = {
-            "Timeframe": {"rich_text": [{"text": {"content": timeframe}}]},
-            "Updated": {"date": {"start": datetime.datetime.now().isoformat()}},
-            "CSV": {"url": csv_url},
-            "Chart": {"url": chart_url},
-        }
-
-        if not page_id:
-            print(f"[+] Creating new page for {symbol}...")
-            notion.pages.create(
-                parent={"database_id": NOTION_DATABASE_ID},
-                properties={"Name": {"title": [{"text": {"content": symbol}}]}, **props},
-            )
-        else:
-            print(f"[~] Page exists for {symbol}, updating...")
-            notion.pages.update(page_id=page_id, properties=props)
-            print(f"[✓] Updated Notion entry for {symbol}")
-
-    print("\n✅ All symbols synced to Notion successfully!")
+            print(f"[*] Syncing {symbol} ({freq}) to Notion...")
+            upsert_page(symbol, freq, csv_path, png_path)
+            print(f"[OK] {symbol} synced successfully.\n")
+        except Exception as e:
+            print(f"[X] Failed to sync {file}: {e}")
 
 
 if __name__ == "__main__":
