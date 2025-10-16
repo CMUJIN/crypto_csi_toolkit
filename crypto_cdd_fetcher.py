@@ -19,7 +19,7 @@ def main():
     ap.add_argument("--out", required=True, help="Output CSV path")
     args = ap.parse_args()
 
-    # --- 如果没提供 --start，就自动从文件名推断 ---
+    # --- 自动推断 start 日期 ---
     if not args.start:
         m = re.search(r'_(\d{4}-\d{2}-\d{2})_to_', args.out)
         if m:
@@ -31,6 +31,7 @@ def main():
 
     url = f"https://www.cryptodatadownload.com/cdd/Binance_{args.symbol}_{args.freq}.csv"
     print(f"[*] Fetching: {url}")
+
     try:
         r = requests.get(url, timeout=60)
         r.raise_for_status()
@@ -38,24 +39,29 @@ def main():
         print(f"[X] Download failed: {e}")
         sys.exit(1)
 
-    csv_data = r.text.splitlines()
-    csv_data = [line for line in csv_data if not line.startswith("Downloaded from")]
-    df = pd.read_csv(StringIO("\n".join(csv_data)), low_memory=False)
+    # --- 清理无效行，只保留包含逗号的行（真实数据行） ---
+    lines = [ln for ln in r.text.splitlines() if "," in ln and not ln.startswith("Downloaded from")]
+    if len(lines) < 5:
+        print(f"[X] Invalid CSV content. First lines: {r.text.splitlines()[:5]}")
+        sys.exit(2)
 
-    # detect date column
+    # 解析 CSV
+    df = pd.read_csv(StringIO("\n".join(lines)), low_memory=False)
+
+    # --- 自动检测日期列 ---
     date_col = None
     for c in df.columns:
         if "date" in c.lower():
             date_col = c
             break
     if date_col is None:
-        print(f"[X] No date/timestamp column found: {list(df.columns)}")
+        print(f"[X] No valid date column found. Columns: {list(df.columns)}")
         sys.exit(2)
 
     df["datetime"] = pd.to_datetime(df[date_col], errors="coerce", utc=True)
     df = df.dropna(subset=["datetime"]).sort_values("datetime")
 
-    # --- 过滤 start 日期之后的数据 ---
+    # --- 按 start 日期过滤 ---
     start_dt = pd.to_datetime(args.start, utc=True)
     df = df[df["datetime"] >= start_dt]
 
