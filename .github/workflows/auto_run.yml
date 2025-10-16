@@ -43,13 +43,14 @@ jobs:
           for item in symbols:
               symbol = item.get("symbol") or item.get("name")
               freq = item.get("freq") or item.get("timeframe") or "1h"
-              start = item.get("start", "2025-08-01")
+              start = str(item.get("start", "2025-08-01"))  # ensure string
 
               if not symbol:
                   raise ValueError(f"Invalid entry in config.yaml: {item}")
 
               print(f"=== Processing {symbol} ({freq}) ===")
 
+              # Step 1: fetch data
               subprocess.run([
                   "python", "crypto_cdd_fetcher.py",
                   "--symbol", symbol,
@@ -58,6 +59,7 @@ jobs:
                   "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
               ], check=True)
 
+              # Step 2: analysis
               subprocess.run([
                   "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
                   f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
@@ -70,6 +72,8 @@ jobs:
                   "--ma_period", str(analysis.get("ma_period", 10)),
                   "--smooth", str(analysis.get("smooth", 3))
               ], check=True)
+
+              print(f"[OK] Finished {symbol} ({freq}) analysis successfully.")
           PY
 
       - name: Run analysis
