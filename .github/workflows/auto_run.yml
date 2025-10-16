@@ -20,16 +20,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        working-directory: ./
         run: |
           pip install -r requirements.txt || true
           pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
 
       - name: Run Crypto CSI Analysis
+        working-directory: ./
         run: |
           echo "=== Start CSI Auto Analysis ==="
-          python ./run_analysis.py
+          python run_analysis.py
 
       - name: Commit and push results
+        working-directory: ./
         run: |
           echo "[INFO] Commit results..."
           git config --global user.email "actions@github.com"
@@ -39,9 +42,10 @@ jobs:
           git push || echo "No permission to push"
 
       - name: Upload results to Notion
+        working-directory: ./
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
           echo "[INFO] Uploading results to Notion..."
-          python ./upload_to_notion_v2.6.py
+          python upload_to_notion_v2.6.py
