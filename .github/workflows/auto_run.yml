@@ -27,7 +27,7 @@ jobs:
       - name: Run Crypto CSI Analysis
         run: |
           echo "=== Start CSI Auto Analysis ==="
-          python run_analysis.py
+          python ./run_analysis.py
 
       - name: Commit and push results
         run: |
@@ -44,4 +44,4 @@ jobs:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
           echo "[INFO] Uploading results to Notion..."
-          python upload_to_notion_v2.6.py
+          python ./upload_to_notion_v2.6.py
