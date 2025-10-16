@@ -50,7 +50,6 @@ jobs:
 
               print(f"=== Processing {symbol} ({freq}) ===")
 
-              # Step 1: fetch data
               subprocess.run([
                   "python", "crypto_cdd_fetcher.py",
                   "--symbol", symbol,
@@ -59,7 +58,6 @@ jobs:
                   "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
               ], check=True)
 
-              # Step 2: analysis
               subprocess.run([
                   "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
                   f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
@@ -77,7 +75,9 @@ jobs:
           PY
 
       - name: Run analysis
-        run: python run_analysis.py
+        run: |
+          mkdir -p data docs
+          python run_analysis.py
 
       - name: Commit and push results
         run: |
