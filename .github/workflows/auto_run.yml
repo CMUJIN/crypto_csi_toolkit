@@ -11,25 +11,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 🔹 Checkout repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 🐍 Set up Python
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: 📦 Install dependencies
+      - name: Install dependencies
         run: |
           pip install -r requirements.txt || true
           pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
 
-      - name: 🕒 Run Crypto CSI Analysis
+      - name: Run Crypto CSI Analysis
         run: |
           echo "=== Start CSI Auto Analysis ==="
           python run_analysis.py
 
-      - name: 📤 Commit and push results
+      - name: Commit and push results
         run: |
           echo "[INFO] Commit results..."
           git config --global user.email "actions@github.com"
@@ -38,7 +38,7 @@ jobs:
           git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes to commit"
           git push || echo "No permission to push"
 
-      - name: 🚀 Upload results to Notion
+      - name: Upload results to Notion
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
