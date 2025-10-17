@@ -1,108 +1,69 @@
-name: Auto Crypto CSI Analysis
+name: Auto Crypto Chip Analysis
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'
-
-permissions:
-  contents: write
+    - cron: "0 8,16 * * *"  # 北京时间16:00和00:00（UTC+8）
+  workflow_dispatch:
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
+
     steps:
+      # Step 1️⃣ 拉取仓库
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Step 2️⃣ 设置 Python 环境
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: 3.11
 
+      # Step 3️⃣ 安装依赖
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy matplotlib requests openpyxl pyyaml notion-client
+          pip install -r requirements.txt || pip install pandas matplotlib numpy openpyxl akshare notion-client
 
-      - name: Create analysis runner
+      # Step 4️⃣ 清理旧文件
+      - name: Clean old docs and data
         run: |
-          cat > run_analysis.py << 'PY'
-          import subprocess, yaml
-          from pathlib import Path
-
-          cfg_path = Path("config.yaml")
-          if not cfg_path.exists():
-              raise FileNotFoundError("Missing config.yaml")
-
-          cfg = yaml.safe_load(cfg_path.read_text())
-          symbols = cfg.get("symbols", [])
-          analysis = cfg.get("analysis", {})
-
-          for item in symbols:
-              symbol = item.get("symbol") or item.get("name")
-              freq = item.get("freq") or item.get("timeframe") or "1h"
-              start = str(item.get("start", "2025-08-01"))
-
-              if not symbol:
-                  raise ValueError(f"Invalid entry in config.yaml: {item}")
-
-              print(f"=== Processing {symbol} ({freq}) ===")
-
-              subprocess.run([
-                  "python", "crypto_cdd_fetcher.py",
-                  "--symbol", symbol,
-                  "--freq", freq,
-                  "--start", start,
-                  "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
-              ], check=True)
-
-              subprocess.run([
-                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
-                  f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
-                  "--window_strength", str(analysis.get("window_strength", 5)),
-                  "--window_zone", str(analysis.get("window_zone", 60)),
-                  "--bins_pct", str(analysis.get("bins_pct", 1)),
-                  "--beta", str(analysis.get("beta", 0.7)),
-                  "--half_life", str(analysis.get("half_life", 10000000)),
-                  "--quantile", str(analysis.get("quantile", 0.8)),
-                  "--ma_period", str(analysis.get("ma_period", 10)),
-                  "--smooth", str(analysis.get("smooth", 3))
-              ], check=True)
-
-              print(f"[OK] Finished {symbol} ({freq}) analysis successfully.")
-          PY
-
-      - name: Run analysis
-        run: |
-          mkdir -p data docs
           echo "[INFO] Cleaning old docs..."
           find docs/ -type f -not -name '.gitkeep' -delete || true
-          python run_analysis.py
+          echo "[INFO] Cleaning old data..."
+          find data/ -type f -not -name '.gitkeep' -delete || true
 
-
-      - name: Sync results to docs
+      # Step 5️⃣ 抓取最新行情数据
+      - name: Run data downloader
         run: |
-          mkdir -p docs
-          cp -r data/* docs/ || true
-          ls -lh docs/ || true
+          echo "[INFO] Downloading latest crypto/futures data..."
+          # 示例: 抓取BTC/ETH数据，可按需修改 symbols
+          python cn_futures_downloader.py --symbols BTCUSDT,ETHUSDT --freq 1h --start 2025-10-01 --out ./data
 
-      - name: Commit and push results
+      # Step 6️⃣ 运行筹码强度分析
+      - name: Run chip strength analysis
+        run: |
+          echo "[INFO] Running chip strength analysis..."
+          for f in data/*.csv; do
+            echo "[~] Processing $f ..."
+            python crypto_chip_timeline_analysis_PRO_v3.9.5.py "$f"
+          done
+
+      # Step 7️⃣ 上传结果至 Notion
+      - name: Upload analysis results to Notion
+        run: |
+          echo "[INFO] Uploading results to Notion..."
+          python upload_to_notion.py
+
+      # Step 8️⃣ 提交到 GitHub（强制 commit）
+      - name: Commit and push updated docs
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          echo "[INFO] Adding timestamp for visibility..."
           echo "$(date)" > docs/.build_timestamp.txt
-          touch docs/*
-          git add docs data
-          git commit -m "Auto update docs ($(date '+%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
+
+          git add -A docs data
+          git commit --allow-empty -m "Auto update docs ($(date '+%Y-%m-%d %H:%M:%S'))"
           git push
-
-
-      - name: Upload results to Notion
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          NOTION_SUMMARY_PAGE_ID: ${{ secrets.NOTION_SUMMARY_PAGE_ID }}
-        run: |
-          python upload_to_notion.py
-
