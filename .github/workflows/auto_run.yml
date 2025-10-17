@@ -66,7 +66,7 @@ jobs:
 
               # 2) 采用“期货逻辑对齐”的加密分析脚本（v4.0 hybrid）
               subprocess.run([
-                  "python", "crypto_chip_timeline_analysis_PRO_v4.0_hybrid.py",
+                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
                   f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
                   "--window_strength", str(analysis.get("window_strength", 5)),
                   "--window_zone",     str(analysis.get("window_zone", 60)),
