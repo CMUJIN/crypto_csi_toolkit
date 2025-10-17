@@ -154,13 +154,11 @@ def update_summary(chip_data):
             "image": {"type": "external", "external": {"url": chart_url}}
         })
 
-        # 表格（Top 20%）
+        # 表格（完整 chip_strength）
         try:
             import pandas as pd
             df = pd.read_csv(chip_csv)
-            top_df = df.sort_values("strength", ascending=False)
-            threshold = top_df["strength"].quantile(0.8)
-            filtered = top_df[top_df["strength"] >= threshold].head(30)
+            filtered = df.copy()  # 不再筛选前 20%
             children.extend(build_table_block(filtered))
         except Exception as e:
             children.append({
@@ -168,6 +166,7 @@ def update_summary(chip_data):
                 "type": "paragraph",
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load table: {e}"}}]}
             })
+
 
     # 关键字参数 children=children
     notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=children)
