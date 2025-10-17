@@ -96,27 +96,56 @@ def create_or_update_record(symbol, chart_url, csv_url):
 
 
 def build_table_block(df: pd.DataFrame):
-    """生成一个 table block（含子行），仅保留 low/high/strength 三列"""
+    """生成完整字段表格，与数据库 CSV 一致"""
     if df.empty:
         return []
 
-    df = df[["low", "high", "strength"]].head(30)
-    header = ["low", "high", "strength"]
+    # 保留原始列顺序
+    header = list(df.columns)
 
-    # 构造 table_row 子块（注意 table_row 的正确嵌套结构）
-    rows = []
+    # 构造表头行
+    header_row = {
+        "object": "block",
+        "type": "table_row",
+        "table_row": {
+            "cells": [[{"type": "text", "text": {"content": col}}] for col in header]
+        }
+    }
+
+    # 构造数据行
+    rows = [header_row]
     for _, row in df.iterrows():
-        cells_rt = []
+        cells = []
         for col in header:
-            val = fmt_price(row[col]) if col in ("low", "high") else f"{row[col]:.3f}"
-            cells_rt.append([{"type": "text", "text": {"content": val}}])  # 每个单元格是 rich_text 列表
+            val = row[col]
+            # 格式化数字字段
+            if isinstance(val, (int, float)) and pd.notna(val):
+                if "low" in col.lower() or "high" in col.lower():
+                    val = f"{val:.2f}" if val < 100 else f"{int(round(val))}"
+                else:
+                    val = f"{val:.3f}"
+            else:
+                val = str(val)
+            cells.append([{"type": "text", "text": {"content": val}}])
         rows.append({
             "object": "block",
             "type": "table_row",
-            "table_row": {
-                "cells": cells_rt
-            }
+            "table_row": {"cells": cells}
         })
+
+    # 返回 table 块
+    table_block = [{
+        "object": "block",
+        "type": "table",
+        "table": {
+            "table_width": len(header),
+            "has_column_header": True,
+            "has_row_header": False,
+            "children": rows
+        }
+    }]
+    return table_block
+
 
     # 返回一个包含 table 与其 children（table_row）的块
     table_block = [{
