@@ -75,8 +75,11 @@ jobs:
 
       - name: Run analysis
         run: |
-          mkdir -p data docs
+          echo "[INFO] Cleaning all old docs..."
+          find docs/ -mindepth 1 -type f -delete || true
+          find docs/ -mindepth 1 -type d -empty -delete || true
           python run_analysis.py
+
 
       - name: Sync results to docs
         run: |
