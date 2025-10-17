@@ -1,9 +1,9 @@
 symbols:
   - name: ETHUSDT
-    start: 2025-10-01
+    start: 2025-07-29
     timeframe: 1h
   - name: BTCUSDT
-    start: 2025-10-01
+    start: 2025-07-29
     timeframe: 1h
   #- name: UNIUSDT
    # start: 2025-08-01
