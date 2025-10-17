@@ -5,9 +5,12 @@ symbols:
   - name: BTCUSDT
     start: 2025-07-29
     timeframe: 1h
-  #- name: UNIUSDT
-   # start: 2025-08-01
-    #timeframe: 1h
+  - name: AAVEUSDT
+    start: 2025-08-01
+    timeframe: 1h
+  - name: UNIUSDT
+    start: 2025-08-01
+    timeframe: 1h
 
 analysis:
   window_strength: 5
