@@ -96,21 +96,30 @@ def create_or_update_record(symbol, chart_url, csv_url):
 
 
 def build_table_block(df: pd.DataFrame):
-    """生成三列表格块：low, high, strength"""
+    """生成一个 table block（含子行），仅保留 low/high/strength 三列"""
     if df.empty:
         return []
+
     df = df[["low", "high", "strength"]].head(30)
     header = ["low", "high", "strength"]
 
+    # 构造 table_row 子块（注意 table_row 的正确嵌套结构）
     rows = []
     for _, row in df.iterrows():
-        cells = []
+        cells_rt = []
         for col in header:
             val = fmt_price(row[col]) if col in ("low", "high") else f"{row[col]:.3f}"
-            cells.append({"type": "text", "text": {"content": val}})
-        rows.append({"type": "table_row", "cells": [[c] for c in cells]})
+            cells_rt.append([{"type": "text", "text": {"content": val}}])  # 每个单元格是 rich_text 列表
+        rows.append({
+            "object": "block",
+            "type": "table_row",
+            "table_row": {
+                "cells": cells_rt
+            }
+        })
 
-    return [{
+    # 返回一个包含 table 与其 children（table_row）的块
+    table_block = [{
         "object": "block",
         "type": "table",
         "table": {
@@ -120,6 +129,8 @@ def build_table_block(df: pd.DataFrame):
             "children": rows
         }
     }]
+    return table_block
+
 
 
 def update_summary(chip_data):
@@ -143,8 +154,9 @@ def update_summary(chip_data):
             "image": {"type": "external", "external": {"url": chart_url}}
         })
 
-        # 表格
+        # 表格（Top 20%）
         try:
+            import pandas as pd
             df = pd.read_csv(chip_csv)
             top_df = df.sort_values("strength", ascending=False)
             threshold = top_df["strength"].quantile(0.8)
@@ -157,8 +169,10 @@ def update_summary(chip_data):
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load table: {e}"}}]}
             })
 
+    # 关键字参数 children=children
     notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=children)
     print(f"[OK] Summary updated successfully with {len(chip_data)} items.")
+
 
 
 # ======== MAIN ========
