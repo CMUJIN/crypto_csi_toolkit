@@ -12,7 +12,7 @@ symbols:
 analysis:
   window_strength: 5
   window_zone: 60
-  bins_pct: 0.5
+  bins_pct: 1
   beta: 0.7
   half_life: 10000000
   quantile: 0.8
