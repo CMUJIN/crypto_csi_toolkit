@@ -157,7 +157,7 @@ def update_summary(chip_data):
                 "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load table: {e}"}}]}
             })
 
-    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children)
+    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=children)
     print(f"[OK] Summary updated successfully with {len(chip_data)} items.")
 
 
