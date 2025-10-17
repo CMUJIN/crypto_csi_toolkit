@@ -211,7 +211,9 @@ def upload_to_notion():
     for file in os.listdir("docs"):
         if file.endswith("_chip_timeline_pro.png"):
             symbol = file.split("_")[1]
-            chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{file}"
+            from datetime import datetime
+            version_tag = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+            chart_url = f"{BASE_URL}/docs/{symbol}_chip_timeline_pro.png?v={version_tag}"
             csv_path = os.path.join("docs", file.replace("_chip_timeline_pro.png", "_chip_strength.csv"))
             csv_url = f"https://cmujin.github.io/crypto_csi_toolkit/{os.path.basename(csv_path)}"
             if os.path.exists(csv_path):
