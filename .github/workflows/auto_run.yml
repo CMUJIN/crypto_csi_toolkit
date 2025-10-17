@@ -87,13 +87,15 @@ jobs:
           cp -r data/* docs/ || true
           ls -lh docs/ || true
 
-      - name: Commit and push results
+      - name: Force commit update (always refresh docs/)
         run: |
-          git config --global user.email "actions@github.com"
-          git config --global user.name "github-actions"
-          git add docs/
-          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
-          git push || echo "No permission to push"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$(date)" > docs/.build_timestamp.txt
+          git add docs data
+          git commit -m "Auto refresh docs ($(date '+%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
+          git push
+
 
       - name: Upload results to Notion
         env:
