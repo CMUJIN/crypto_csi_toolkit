@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-upload_to_notion.py (Secrets-safe Stable Version)
--------------------------------------------------
-✅ 不再硬编码 Notion ID
-✅ 从 GitHub Secrets 读取 NOTION_TOKEN / NOTION_DATABASE_ID / NOTION_SUMMARY_PAGE_ID
-✅ 仅归档旧记录，不删除数据库
-✅ 更新汇总页面图表与表格（Top 20% 筹码区）
+upload_to_notion.py (Safe Stable Version)
+----------------------------------------
+✅ 从 Secrets 读取所有 Notion ID
+✅ 防止误删数据库块
+✅ 每次运行安全清理 Summary 页面并重建图表+表格
+✅ 显示 chip_strength 前 20% 区间
 """
 
 import os, sys, pandas as pd
@@ -23,6 +23,7 @@ if not NOTION_TOKEN or not NOTION_DATABASE_ID or not NOTION_SUMMARY_PAGE_ID:
 notion = Client(auth=NOTION_TOKEN)
 
 # ======== HELPERS ========
+
 def fmt_price(v: float) -> str:
     """格式化价格：大于100取整，否则两位小数"""
     try:
@@ -31,16 +32,23 @@ def fmt_price(v: float) -> str:
     except:
         return str(v)
 
+
 def clear_summary_blocks():
-    """清空汇总页旧内容"""
-    print("[~] Clearing old summary blocks...")
+    """安全清空汇总页内容，仅删除普通块，不删除数据库或子页面"""
+    print("[~] Clearing old summary blocks (safe mode)...")
     try:
         blocks = notion.blocks.children.list(NOTION_SUMMARY_PAGE_ID).get("results", [])
+        removed = 0
         for blk in blocks:
-            notion.blocks.delete(blk["id"])
-        print(f"[OK] Summary cleared: {len(blocks)} blocks removed")
+            blk_type = blk.get("type")
+            # ✅ 仅删除普通内容，不删数据库 / 子页面
+            if blk_type not in ("child_database", "child_page"):
+                notion.blocks.delete(blk["id"])
+                removed += 1
+        print(f"[OK] Summary cleared safely: {removed} blocks removed (database retained)")
     except Exception as e:
-        print(f"[!] Failed to clear summary: {e}")
+        print(f"[!] Failed to clear summary safely: {e}")
+
 
 def find_page_by_token(symbol: str):
     """按 Token 查找数据库记录"""
@@ -55,6 +63,7 @@ def find_page_by_token(symbol: str):
         print(f"[!] find_page_by_token({symbol}) error: {e}")
     return None
 
+
 def archive_old_records():
     """归档旧数据库记录"""
     print("[~] Archiving old database records...")
@@ -65,6 +74,7 @@ def archive_old_records():
         print("[OK] Old records archived")
     except Exception as e:
         print(f"[!] Failed to archive old records: {e}")
+
 
 def create_or_update_record(symbol, chart_url, csv_url):
     """更新或创建数据库记录"""
@@ -83,6 +93,7 @@ def create_or_update_record(symbol, chart_url, csv_url):
             print(f"[+] Created new record: {symbol}")
     except Exception as e:
         print(f"[X] Failed to update/create record for {symbol}: {e}")
+
 
 def build_table_block(df: pd.DataFrame):
     """生成三列表格块：low, high, strength"""
@@ -110,25 +121,29 @@ def build_table_block(df: pd.DataFrame):
         }
     }]
 
+
 def update_summary(chip_data):
-    """重建汇总页"""
+    """重建汇总页（显示图表+表格）"""
     clear_summary_blocks()
     children = []
 
     for item in chip_data:
         symbol, chart_url, chip_csv = item["symbol"], item["chart_url"], item["csv_path"]
 
+        # 标题
         children.append({
             "object": "block",
             "type": "heading_2",
             "heading_2": {"rich_text": [{"type": "text", "text": {"content": symbol}}]}
         })
+        # 图片
         children.append({
             "object": "block",
             "type": "image",
             "image": {"type": "external", "external": {"url": chart_url}}
         })
 
+        # 表格
         try:
             df = pd.read_csv(chip_csv)
             top_df = df.sort_values("strength", ascending=False)
@@ -143,7 +158,8 @@ def update_summary(chip_data):
             })
 
     notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children={"children": children})
-    print(f"[OK] Summary updated: {len(chip_data)} items")
+    print(f"[OK] Summary updated successfully with {len(chip_data)} items.")
+
 
 # ======== MAIN ========
 def upload_to_notion():
@@ -170,7 +186,7 @@ def upload_to_notion():
         create_or_update_record(item["symbol"], item["chart_url"], item["csv_url"])
 
     update_summary(data_items)
-    print("[OK] Database & summary page updated successfully!")
+    print("[OK] Database & summary page updated successfully (safe mode)!")
 
 if __name__ == "__main__":
     upload_to_notion()
