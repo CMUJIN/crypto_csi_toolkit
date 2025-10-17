@@ -1,56 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Enhanced Crypto Data Fetcher (v2.4-stable)
--------------------------------------------
-✓ 下载 CDD 历史数据
-✓ 严格从 --start 日期起输出（早于 start 的数据不会写入）
-✓ 自动尝试用 Binance 实时接口补齐（到当前小时/日）
-   - 先用 https://api.binance.com
-   - 若 451/网络异常，再用 https://data-api.binance.vision
-✓ Binance 接口失败不影响主流程（打印日志后继续）
-✓ 检测时间缺口（基于过滤后的区间）
+Crypto CDD Fetcher v2.6 — 完整字段对齐版
+-----------------------------------------
+✓ 输出字段完全一致（与 CDD）
+✓ Binance 补齐数据字段完整（包含 taker 与 tradecount）
+✓ 仅抓取 start 日期之后的数据
+✓ 接口失败自动降级且不中断
 """
 
 import argparse, os, io, requests, pandas as pd
 from datetime import datetime, timezone
 
+HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; CryptoCSI/2.6)"}
 BINANCE_INTERVALS = {"1h": "1h", "4h": "4h", "1d": "1d"}
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; CryptoCSI/2.4)"}
 
+# ========== 1️⃣ CDD 下载 ==========
 def fetch_cdd(symbol: str, freq: str) -> pd.DataFrame:
-    """从 CryptoDataDownload 获取基础数据"""
     url = f"https://www.cryptodatadownload.com/cdd/Binance_{symbol}_{freq}.csv"
-    print(f"[*] Fetching: {url}")
+    print(f"[*] Fetching CDD: {url}")
     r = requests.get(url, timeout=20, headers=HEADERS)
     if r.status_code != 200:
         raise ValueError(f"[X] Download failed: HTTP {r.status_code}")
-
-    # CDD 第一行多为注释，跳过
     df = pd.read_csv(io.StringIO(r.text), skiprows=1)
-    df.columns = [c.lower().strip() for c in df.columns]
-
-    # 兼容 datetime 列
-    if "date" in df.columns:
-        df["datetime"] = pd.to_datetime(df["date"], errors="coerce", utc=True)
-    elif "datetime" in df.columns:
-        df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
-    else:
-        raise ValueError("[X] No valid datetime column found in CDD CSV")
-
-    # 兼容收盘价字段
-    if "close" not in df.columns and "closeusd" in df.columns:
-        df.rename(columns={"closeusd": "close"}, inplace=True)
-
-    # 兼容成交量字段（尽量保留原列名，不强制重命名）
-    df = df.dropna(subset=["datetime"]).sort_values("datetime").reset_index(drop=True)
-    print(f"[✓] CDD loaded, rows={len(df)}, last={df['datetime'].max()}")
+    df.columns = [c.strip() for c in df.columns]
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", utc=True)
+    df = df.sort_values("Date").dropna(subset=["Date"]).reset_index(drop=True)
+    print(f"[✓] CDD loaded, rows={len(df)}, last={df['Date'].max()}")
     return df
 
 
-def _binance_endpoint_list():
-    # 主端点 + 公开镜像端点
+# ========== 2️⃣ Binance 下载 ==========
+def _binance_endpoints():
     return [
         "https://api.binance.com/api/v3/klines",
         "https://data-api.binance.vision/api/v3/klines",
@@ -58,135 +40,123 @@ def _binance_endpoint_list():
 
 
 def fetch_binance(symbol: str, interval: str, start_time: datetime) -> pd.DataFrame:
-    """从 Binance 获取 start_time 之后的数据；失败返回空 DataFrame"""
-    params = {"symbol": symbol, "interval": interval, "limit": 1000}
-    params["startTime"] = int(start_time.timestamp() * 1000)
+    params = {"symbol": symbol, "interval": interval, "limit": 1000,
+              "startTime": int(start_time.timestamp() * 1000)}
 
-    for ep in _binance_endpoint_list():
+    for ep in _binance_endpoints():
         try:
             r = requests.get(ep, params=params, timeout=12, headers=HEADERS)
             if r.status_code == 451:
-                print(f"[!] Binance 451 restricted at {ep}; trying fallback...")
+                print(f"[!] Binance 451 @ {ep}, switching mirror...")
                 continue
             if r.status_code != 200:
-                print(f"[!] Binance fetch failed: HTTP {r.status_code} @ {ep}")
+                print(f"[!] Binance fetch failed: HTTP {r.status_code}")
                 continue
 
             data = r.json()
             if not isinstance(data, list) or len(data) == 0:
-                print(f"[!] Binance returned empty list @ {ep}")
+                print("[!] Binance returned empty")
                 continue
 
-            df = pd.DataFrame(
-                data,
-                columns=[
-                    "open_time", "open", "high", "low", "close",
-                    "volume", "close_time", "quote_asset_volume",
-                    "trades", "taker_buy_base", "taker_buy_quote", "ignore"
-                ],
-            )
-            df["datetime"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            df = pd.DataFrame(data, columns=[
+                "open_time", "open", "high", "low", "close", "volume",
+                "close_time", "quote_asset_volume", "trades",
+                "taker_buy_base", "taker_buy_quote", "ignore"
+            ])
+            df["Date"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+            df["Symbol"] = symbol
+            df["Unix"] = df["open_time"]
             df = df.astype({
                 "open": float, "high": float, "low": float,
-                "close": float, "volume": float
+                "close": float, "volume": float,
+                "quote_asset_volume": float,
+                "taker_buy_base": float, "taker_buy_quote": float,
+                "trades": int
             })
-            df = df[["datetime", "open", "high", "low", "close", "volume"]].sort_values("datetime")
-            print(f"[+] Binance 补齐数据 {len(df)} 行, 起点 {df['datetime'].min()}, 终点 {df['datetime'].max()} via {ep}")
+            df = df.rename(columns={
+                "open": "Open", "high": "High", "low": "Low", "close": "Close",
+                "volume": "Volume", "quote_asset_volume": "Volume USDT",
+                "trades": "tradecount", "taker_buy_base": "taker_base_vol",
+                "taker_buy_quote": "taker_quote_vol"
+            })
+            df = df[[
+                "Unix", "Date", "Symbol", "Open", "High", "Low", "Close",
+                "Volume", "Volume USDT", "tradecount",
+                "taker_base_vol", "taker_quote_vol"
+            ]]
+            print(f"[+] Binance 补齐 {len(df)} 行, 起点 {df['Date'].min()}, 终点 {df['Date'].max()}")
             return df
         except Exception as e:
             print(f"[!] Binance fetch error @ {ep}: {e}")
-
-    # 全部失败
     return pd.DataFrame()
 
 
-def merge_data(df_cdd: pd.DataFrame, df_binance: pd.DataFrame) -> pd.DataFrame:
-    """合并并去重（datetime 唯一）"""
+# ========== 3️⃣ 合并逻辑 ==========
+def merge_data(df_cdd, df_binance):
     if df_binance.empty:
-        print("[=] Binance 数据为空，保持原始 CDD 数据")
+        print("[=] Binance 数据为空，使用 CDD 原始数据")
         return df_cdd
-
     merged = pd.concat([df_cdd, df_binance], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["datetime"], keep="last")
-    merged = merged.sort_values("datetime").reset_index(drop=True)
-    print(f"[✓] 合并后总行数={len(merged)}, 最新={merged['datetime'].max()}")
-    return merged
+    merged = merged.drop_duplicates(subset=["Date"], keep="last").sort_values("Date")
+    print(f"[✓] 合并后总行数={len(merged)}, 最新={merged['Date'].max()}")
+    return merged.reset_index(drop=True)
 
 
-def check_gaps(df: pd.DataFrame, freq: str):
-    """检测时间连续性（基于 freq）"""
+# ========== 4️⃣ 缺口检测 ==========
+def check_gaps(df, freq):
     if freq not in ["1h", "4h", "1d"] or df.empty:
         return
-    df = df.sort_values("datetime")
-    dt_hours = df["datetime"].diff().dt.total_seconds().div(3600)
+    dt = df["Date"].diff().dt.total_seconds().div(3600)
     gap_threshold = {"1h": 1.5, "4h": 5, "1d": 26}[freq]
-    gaps = df.loc[dt_hours > gap_threshold, "datetime"]
+    gaps = df.loc[dt > gap_threshold, "Date"]
     if not gaps.empty:
-        print(f"[!] 检测到 {len(gaps)} 个时间缺口（已过滤后的区间）：")
-        for g in gaps.head(10):  # 避免日志过长，仅前10个
-            print(f"    - 缺口起点: {g}")
-        if len(gaps) > 10:
-            print(f"    ... 其余 {len(gaps)-10} 个省略")
+        print(f"[!] 检测到 {len(gaps)} 个时间缺口（前5）:")
+        for g in gaps.head(5):
+            print("   ", g)
     else:
-        print("[✓] 时间序列连续，无明显缺口")
+        print("[✓] 时间序列连续")
 
 
+# ========== 5️⃣ 主流程 ==========
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", required=True)
     ap.add_argument("--freq", required=True, choices=["1h", "4h", "1d"])
-    ap.add_argument("--start", required=True, help="YYYY-MM-DD")
+    ap.add_argument("--start", required=True)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
-
-    # 解析 start（统一为 UTC）
-    try:
-        start_dt = pd.to_datetime(args.start, utc=True)
-    except Exception:
-        raise ValueError(f"[X] Invalid --start: {args.start}")
+    start_dt = pd.to_datetime(args.start, utc=True)
 
     try:
-        # 1) CDD 历史
         df_cdd = fetch_cdd(args.symbol, args.freq)
-
-        # 2) 增量补齐（以 CDD 最新时间为起点）
-        last_dt = df_cdd["datetime"].max()
+        last_dt = df_cdd["Date"].max()
         now_utc = datetime.now(timezone.utc)
         gap_hours = (now_utc - last_dt).total_seconds() / 3600
 
+        df_binance = pd.DataFrame()
         if gap_hours > 1:
-            interval = BINANCE_INTERVALS.get(args.freq, "1h")
-            df_binance = fetch_binance(args.symbol, interval, last_dt)
-            df_all = merge_data(df_cdd, df_binance)
+            df_binance = fetch_binance(args.symbol, BINANCE_INTERVALS[args.freq], last_dt)
         else:
-            print("[=] CDD 已接近最新，无需补齐")
-            df_all = df_cdd
+            print("[=] 数据接近最新，无需补齐")
 
-        # 3) 关键修正：**仅保留 >= start 的数据**
-        df_final = df_all[df_all["datetime"] >= start_dt].copy()
-        df_final = df_final.sort_values("datetime").reset_index(drop=True)
-        print(f"[*] Filtered to start >= {start_dt.date()}, rows={len(df_final)} | "
-              f"first={df_final['datetime'].min() if not df_final.empty else 'NA'} | "
-              f"last={df_final['datetime'].max() if not df_final.empty else 'NA'}")
+        df_all = merge_data(df_cdd, df_binance)
+        df_final = df_all[df_all["Date"] >= start_dt].reset_index(drop=True)
+        print(f"[*] Filter >= {start_dt.date()}, rows={len(df_final)}")
 
-        # 4) 基于过滤后的数据做连续性检查
         check_gaps(df_final, args.freq)
-
-        # 5) 保存
         df_final.to_csv(args.out, index=False)
-        print(f"[OK] Saved -> {args.out}  rows={len(df_final)}")
+        print(f"[OK] Saved -> {args.out}")
 
     except Exception as e:
-        print(f"[X] 运行过程中出现错误: {e}")
-        # 兜底：尽可能保存 >= start 的 CDD 子集
+        print(f"[X] 运行错误: {e}")
         try:
-            df_cdd = df_cdd[df_cdd["datetime"] >= start_dt].sort_values("datetime")
+            df_cdd = df_cdd[df_cdd["Date"] >= start_dt]
             df_cdd.to_csv(args.out, index=False)
-            print(f"[!] 已保存 CDD（>=start）数据 -> {args.out} rows={len(df_cdd)}")
+            print(f"[!] 已保存过滤后的 CDD 数据 -> {args.out}")
         except Exception as ee:
-            print(f"[X] 兜底保存失败: {ee}")
+            print(f"[X] 保存失败: {ee}")
 
 
 if __name__ == "__main__":
