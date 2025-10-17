@@ -76,7 +76,7 @@ jobs:
       - name: Run analysis
         run: |
           mkdir -p data docs
-          echo "[INFO] Cleaning old files in docs/..."
+          echo "[INFO] Cleaning old docs..."
           find docs/ -type f -not -name '.gitkeep' -delete || true
           python run_analysis.py
 
@@ -87,13 +87,13 @@ jobs:
           cp -r data/* docs/ || true
           ls -lh docs/ || true
 
-      - name: Force commit update (always refresh docs/)
+      - name: Commit and push results
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "$(date)" > docs/.build_timestamp.txt
           git add docs data
-          git commit -m "Auto refresh docs ($(date '+%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
+          git commit -m "Auto update docs ($(date '+%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
           git push
 
 
