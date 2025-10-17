@@ -92,6 +92,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "$(date)" > docs/.build_timestamp.txt
+          touch docs/*
           git add docs data
           git commit -m "Auto update docs ($(date '+%Y-%m-%d %H:%M:%S'))" || echo "No changes to commit"
           git push
