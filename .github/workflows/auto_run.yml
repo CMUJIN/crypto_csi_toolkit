@@ -94,6 +94,11 @@ jobs:
           git add docs/
           git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
           git push || echo "No permission to push"
+      
+      - name: Wait for GitHub Pages to refresh
+        run: |
+          echo "[INFO] Waiting 90 seconds for GitHub Pages to deploy new docs..."
+          sleep 90
 
       - name: Upload results to Notion
         env:
