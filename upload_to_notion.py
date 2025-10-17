@@ -1,180 +1,176 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-upload_to_notion.py (final stable version)
-------------------------------------------
-Features:
-1. Upload only *_chip_strength.csv results.
-2. Show Top 20% zones in Notion summary (≤30 rows).
-3. Display only [low, high, strength] columns.
-4. Format prices intelligently.
+upload_to_notion.py (Secrets-safe Stable Version)
+-------------------------------------------------
+✅ 不再硬编码 Notion ID
+✅ 从 GitHub Secrets 读取 NOTION_TOKEN / NOTION_DATABASE_ID / NOTION_SUMMARY_PAGE_ID
+✅ 仅归档旧记录，不删除数据库
+✅ 更新汇总页面图表与表格（Top 20% 筹码区）
 """
 
-import os
-import pandas as pd
+import os, sys, pandas as pd
 from notion_client import Client
-from datetime import datetime, timezone
 
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
-NOTION_SUMMARY_PAGE_ID = os.getenv("NOTION_SUMMARY_PAGE_ID")
+# ======== CONFIG ========
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID")
+NOTION_SUMMARY_PAGE_ID = os.environ.get("NOTION_SUMMARY_PAGE_ID")
+
+if not NOTION_TOKEN or not NOTION_DATABASE_ID or not NOTION_SUMMARY_PAGE_ID:
+    sys.exit("[X] Missing required Notion secrets. Please check GitHub Secrets configuration.")
 
 notion = Client(auth=NOTION_TOKEN)
 
-# -----------------------------
-#  Helper functions
-# -----------------------------
-def fmt_price(v):
-    """Format low/high values based on magnitude"""
+# ======== HELPERS ========
+def fmt_price(v: float) -> str:
+    """格式化价格：大于100取整，否则两位小数"""
     try:
         v = float(v)
-        return f"{v:.0f}" if v >= 100 else f"{v:.2f}"
-    except Exception:
+        return f"{int(round(v))}" if v >= 100 else f"{v:.2f}"
+    except:
         return str(v)
 
-def read_top_chip_strength(csv_path, top_pct=0.2, max_rows=30):
-    """Read chip_strength.csv and select top N%"""
-    df = pd.read_csv(csv_path)
-    df = df[[c for c in df.columns if c.lower() in ["low", "high", "strength"]]]
-    df = df.sort_values("strength", ascending=False)
-    top_n = int(len(df) * top_pct)
-    top_n = min(max_rows, max(1, top_n))
-    return df.head(top_n)
+def clear_summary_blocks():
+    """清空汇总页旧内容"""
+    print("[~] Clearing old summary blocks...")
+    try:
+        blocks = notion.blocks.children.list(NOTION_SUMMARY_PAGE_ID).get("results", [])
+        for blk in blocks:
+            notion.blocks.delete(blk["id"])
+        print(f"[OK] Summary cleared: {len(blocks)} blocks removed")
+    except Exception as e:
+        print(f"[!] Failed to clear summary: {e}")
 
-def clear_summary_page_blocks(page_id):
-    """Delete all blocks under summary page before re-adding"""
-    children = notion.blocks.children.list(page_id).get("results", [])
-    for c in children:
-        try:
-            notion.blocks.delete(c["id"])
-        except Exception:
-            pass
+def find_page_by_token(symbol: str):
+    """按 Token 查找数据库记录"""
+    try:
+        res = notion.databases.query(
+            NOTION_DATABASE_ID,
+            filter={"property": "Token", "title": {"equals": symbol}}
+        )
+        if res.get("results"):
+            return res["results"][0]["id"]
+    except Exception as e:
+        print(f"[!] find_page_by_token({symbol}) error: {e}")
+    return None
 
-def build_symbol_section_blocks(symbol, csv_path, chart_url):
-    """Create heading + image + 3-column Top20% chip_strength table"""
-    df = read_top_chip_strength(csv_path, top_pct=0.2, max_rows=30)
-    df["low"] = df["low"].apply(fmt_price)
-    df["high"] = df["high"].apply(fmt_price)
+def archive_old_records():
+    """归档旧数据库记录"""
+    print("[~] Archiving old database records...")
+    try:
+        res = notion.databases.query(NOTION_DATABASE_ID)
+        for page in res.get("results", []):
+            notion.pages.update(page["id"], archived=True)
+        print("[OK] Old records archived")
+    except Exception as e:
+        print(f"[!] Failed to archive old records: {e}")
 
-    headers = ["low", "high", "strength"]
-    header_row = {
-        "object": "block",
-        "type": "table_row",
-        "table_row": {
-            "cells": [[{"type": "text", "text": {"content": h}}] for h in headers]
-        },
+def create_or_update_record(symbol, chart_url, csv_url):
+    """更新或创建数据库记录"""
+    pid = find_page_by_token(symbol)
+    props = {
+        "Token": {"title": [{"text": {"content": symbol}}]},
+        "Chart": {"url": chart_url},
+        "CSV": {"url": csv_url},
     }
+    try:
+        if pid:
+            notion.pages.update(pid, properties=props)
+            print(f"[~] Updated record: {symbol}")
+        else:
+            notion.pages.create(parent={"database_id": NOTION_DATABASE_ID}, properties=props)
+            print(f"[+] Created new record: {symbol}")
+    except Exception as e:
+        print(f"[X] Failed to update/create record for {symbol}: {e}")
 
-    data_rows = []
+def build_table_block(df: pd.DataFrame):
+    """生成三列表格块：low, high, strength"""
+    if df.empty:
+        return []
+    df = df[["low", "high", "strength"]].head(30)
+    header = ["low", "high", "strength"]
+
+    rows = []
     for _, row in df.iterrows():
-        cells = [[{"type": "text", "text": {"content": str(row[col])}}] for col in headers]
-        data_rows.append({
-            "object": "block",
-            "type": "table_row",
-            "table_row": {"cells": cells},
-        })
+        cells = []
+        for col in header:
+            val = fmt_price(row[col]) if col in ("low", "high") else f"{row[col]:.3f}"
+            cells.append({"type": "text", "text": {"content": val}})
+        rows.append({"type": "table_row", "cells": [[c] for c in cells]})
 
-    table_block = {
+    return [{
         "object": "block",
         "type": "table",
         "table": {
-            "table_width": len(headers),
+            "table_width": len(header),
             "has_column_header": True,
             "has_row_header": False,
-            "children": [header_row] + data_rows,
-        },
-    }
+            "children": rows
+        }
+    }]
 
-    image_block = {
-        "object": "block",
-        "type": "image",
-        "image": {"type": "external", "external": {"url": chart_url}},
-    }
+def update_summary(chip_data):
+    """重建汇总页"""
+    clear_summary_blocks()
+    children = []
 
-    heading_block = {
-        "object": "block",
-        "type": "heading_2",
-        "heading_2": {
-            "rich_text": [
-                {"type": "text", "text": {"content": f"{symbol} Chip Strength (Top 20%)"}}
-            ]
-        },
-    }
+    for item in chip_data:
+        symbol, chart_url, chip_csv = item["symbol"], item["chart_url"], item["csv_path"]
 
-    return [heading_block, image_block, table_block]
-
-
-# -----------------------------
-#  Main upload logic
-# -----------------------------
-def upload_to_notion():
-    print("[*] Notion sync start...")
-
-    items = []
-    for fn in sorted(os.listdir("docs")):
-        if not fn.endswith("_chip_strength.csv"):
-            continue
-
-        csv_path = os.path.join("docs", fn)
-        symbol = fn.split("_")[1].upper()
-
-        chart_name = fn.replace("_chip_strength.csv", "_chip_timeline_pro.png")
-        chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{chart_name}"
-
-        items.append({
-            "symbol": symbol,
-            "csv_path": csv_path,
-            "chart_url": chart_url,
+        children.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": symbol}}]}
+        })
+        children.append({
+            "object": "block",
+            "type": "image",
+            "image": {"type": "external", "external": {"url": chart_url}}
         })
 
-    print(f"[OK] Found {len(items)} chip_strength CSVs.")
+        try:
+            df = pd.read_csv(chip_csv)
+            top_df = df.sort_values("strength", ascending=False)
+            threshold = top_df["strength"].quantile(0.8)
+            filtered = top_df[top_df["strength"] >= threshold].head(30)
+            children.extend(build_table_block(filtered))
+        except Exception as e:
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load table: {e}"}}]}
+            })
 
-    # clear previous blocks (do NOT delete database)
-    print("[~] Clearing old blocks from summary page...")
-    clear_summary_page_blocks(NOTION_SUMMARY_PAGE_ID)
+    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children={"children": children})
+    print(f"[OK] Summary updated: {len(chip_data)} items")
 
-    # rebuild blocks for each symbol
-    new_blocks = []
-    for it in items:
-        new_blocks += build_symbol_section_blocks(it["symbol"], it["csv_path"], it["chart_url"])
+# ======== MAIN ========
+def upload_to_notion():
+    print("[*] Notion sync start...")
+    data_items = []
 
-    # upload blocks to summary page
-    notion.blocks.children.append(block_id=NOTION_SUMMARY_PAGE_ID, children=new_blocks)
-    print("[OK] Summary page updated successfully!")
+    for file in os.listdir("docs"):
+        if file.endswith("_chip_timeline_pro.png"):
+            symbol = file.split("_")[1]
+            chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{file}"
+            csv_path = os.path.join("docs", file.replace("_chip_timeline_pro.png", "_chip_strength.csv"))
+            csv_url = f"https://cmujin.github.io/crypto_csi_toolkit/{os.path.basename(csv_path)}"
+            if os.path.exists(csv_path):
+                data_items.append({"symbol": symbol, "chart_url": chart_url, "csv_path": csv_path, "csv_url": csv_url})
 
-    # update database records (overwrite previous entries)
-    for it in items:
-        update_or_create_database_record(it["symbol"], it["chart_url"])
-    print("[OK] Database updated successfully.")
+    if not data_items:
+        print("[!] No data found, abort.")
+        return
 
+    print(f"[OK] Found {len(data_items)} chip_strength CSVs.")
+    archive_old_records()
 
-def update_or_create_database_record(symbol, chart_url):
-    """Overwrite database record (do not delete database)"""
-    try:
-        pages = notion.databases.query(
-            NOTION_DATABASE_ID,
-            filter={"property": "Token", "title": {"equals": symbol}},
-        )
-        if pages["results"]:
-            page_id = pages["results"][0]["id"]
-            notion.pages.update(
-                page_id=page_id,
-                properties={
-                    "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
-                    "Chart": {"url": chart_url},
-                },
-            )
-        else:
-            notion.pages.create(
-                parent={"database_id": NOTION_DATABASE_ID},
-                properties={
-                    "Token": {"title": [{"text": {"content": symbol}}]},
-                    "Chart": {"url": chart_url},
-                    "Updated": {"date": {"start": datetime.now(timezone.utc).isoformat()}},
-                },
-            )
-    except Exception as e:
-        print(f"[X] Failed to update DB record for {symbol}: {e}")
+    for item in data_items:
+        create_or_update_record(item["symbol"], item["chart_url"], item["csv_url"])
 
+    update_summary(data_items)
+    print("[OK] Database & summary page updated successfully!")
 
 if __name__ == "__main__":
     upload_to_notion()
