@@ -2,9 +2,6 @@ symbols:
   - name: AAVEUSDT
     start: 2025-08-01
     timeframe: 1h
-  - name: UNIUSDT
-    start: 2025-08-01
-    timeframe: 1h
   - name: ETHUSDT
     start: 2025-07-29
     timeframe: 1h
