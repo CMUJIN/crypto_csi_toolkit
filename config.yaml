@@ -1,12 +1,12 @@
 symbols:
   - name: AAVEUSDT
-    start: 2025-08-01
+    start: 2025-10-02
     timeframe: 1h
   - name: ETHUSDT
-    start: 2025-07-29
+    start: 2025-10-202
     timeframe: 1h
   - name: BTCUSDT
-    start: 2025-07-29
+    start: 2025-10-02
     timeframe: 1h
 
 analysis:
