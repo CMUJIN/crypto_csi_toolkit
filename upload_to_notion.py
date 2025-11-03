@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-upload_to_notion.py (Chip + Liquidity Display, No Liquidity CSV)
----------------------------------------------------------------
-✅ 同步上传两类图表（Chip + Liquidity）
-✅ 显示最新更新时间
-✅ 仅显示 Chip Strength 表格
-❌ 不显示 Liquidity CSV
-❌ 不写入数据库
+upload_to_notion.py (Chip + Liquidity Hybrid Display)
+--------------------------------------------------------
+✅ 从 Secrets 读取 Notion Token 与页面 ID
+✅ 自动识别 docs/ 下的筹码分析图与流动性曲线图
+✅ 筹码分析显示表格与更新时间
+✅ 流动性曲线仅显示图片与更新时间
+✅ 安全清理 Summary 页面，仅删除普通块，不删除数据库或子页面
 """
 
 import os, sys, pandas as pd
@@ -25,6 +25,15 @@ notion = Client(auth=NOTION_TOKEN)
 
 
 # ======== HELPERS ========
+def fmt_price(v: float) -> str:
+    """格式化价格：大于100取整，否则两位小数"""
+    try:
+        v = float(v)
+        return f"{int(round(v))}" if v >= 100 else f"{v:.2f}"
+    except:
+        return str(v)
+
+
 def clear_summary_blocks():
     """安全清空汇总页内容，仅删除普通块，不删除数据库或子页面"""
     print("[~] Clearing old summary blocks (safe mode)...")
@@ -41,22 +50,12 @@ def clear_summary_blocks():
         print(f"[!] Failed to clear summary safely: {e}")
 
 
-def build_table_block(df: pd.DataFrame, title: str = None, max_rows: int = 20):
-    """生成 Notion 表格块，支持可选标题"""
+def build_table_block(df: pd.DataFrame):
+    """生成完整字段表格，与数据库 CSV 一致"""
     if df.empty:
         return []
 
-    df = df.head(max_rows)
     header = list(df.columns)
-    blocks = []
-
-    if title:
-        blocks.append({
-            "object": "block",
-            "type": "heading_3",
-            "heading_3": {"rich_text": [{"type": "text", "text": {"content": title}}]}
-        })
-
     header_row = {
         "object": "block",
         "type": "table_row",
@@ -69,13 +68,20 @@ def build_table_block(df: pd.DataFrame, title: str = None, max_rows: int = 20):
         for col in header:
             val = row[col]
             if isinstance(val, (int, float)) and pd.notna(val):
-                val = f"{val:.4g}"
+                if "low" in col.lower() or "high" in col.lower():
+                    val = f"{val:.2f}" if val < 100 else f"{int(round(val))}"
+                else:
+                    val = f"{val:.3f}"
             else:
                 val = str(val)
             cells.append([{"type": "text", "text": {"content": val}}])
-        rows.append({"object": "block", "type": "table_row", "table_row": {"cells": cells}})
+        rows.append({
+            "object": "block",
+            "type": "table_row",
+            "table_row": {"cells": cells}
+        })
 
-    table_block = [{
+    return [{
         "object": "block",
         "type": "table",
         "table": {
@@ -85,105 +91,101 @@ def build_table_block(df: pd.DataFrame, title: str = None, max_rows: int = 20):
             "children": rows
         }
     }]
-    blocks.extend(table_block)
-    return blocks
-
-
-# ======== CORE ========
-def update_summary(data_items):
-    """重建汇总页（Chip + Liquidity 图像，但不显示 Liquidity CSV）"""
-    clear_summary_blocks()
-    children = []
-
-    for item in data_items:
-        symbol = item["symbol"]
-        chip_chart_url = item.get("chip_chart_url")
-        chip_csv = item.get("chip_csv")
-        liq_chart_url = item.get("liq_chart_url")
-
-        # 更新时间（取最新修改文件）
-        ts_files = [f for f in [chip_csv] if f and os.path.exists(f)]
-        ts = max([os.path.getmtime(f) for f in ts_files]) if ts_files else None
-        ts_str = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else "N/A"
-
-        # ---- 币种标题 ----
-        children.append({
-            "object": "block",
-            "type": "heading_2",
-            "heading_2": {"rich_text": [{"type": "text", "text": {"content": symbol}}]}
-        })
-        # 更新时间
-        children.append({
-            "object": "block",
-            "type": "paragraph",
-            "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"📅 数据更新时间：{ts_str}"}}]}
-        })
-
-        # ---- 筹码强度图 ----
-        if chip_chart_url:
-            children.append({
-                "object": "block",
-                "type": "image",
-                "image": {"type": "external", "external": {"url": chip_chart_url}}
-            })
-
-        # ---- 流动性曲线图 ----
-        if liq_chart_url:
-            children.append({
-                "object": "block",
-                "type": "image",
-                "image": {"type": "external", "external": {"url": liq_chart_url}}
-            })
-
-        # ---- 筹码表格 ----
-        if chip_csv and os.path.exists(chip_csv):
-            try:
-                df_chip = pd.read_csv(chip_csv)
-                children.extend(build_table_block(df_chip, title="Chip Strength Table"))
-            except Exception as e:
-                children.append({
-                    "object": "block",
-                    "type": "paragraph",
-                    "paragraph": {"rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load chip CSV: {e}"}}]}
-                })
-
-    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=children)
-    print(f"[OK] Summary updated successfully with {len(data_items)} symbols.")
 
 
 # ======== MAIN ========
 def upload_to_notion():
     print("[*] Notion sync start (Chip + Liquidity, No CSV for Liquidity)...")
     data_items = []
-    docs_path = "docs"
-    base_url = "https://cmujin.github.io/crypto_csi_toolkit"
 
-    for file in os.listdir(docs_path):
+    # 遍历 docs 目录，识别两类图表
+    for file in os.listdir("docs"):
+        # 筹码分析图
         if file.endswith("_chip_timeline_pro.png"):
             symbol = file.split("_")[1]
             version_tag = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{file}#v={version_tag}"
+            csv_path = os.path.join("docs", file.replace("_chip_timeline_pro.png", "_chip_strength.csv"))
+            csv_url = f"https://cmujin.github.io/crypto_csi_toolkit/{os.path.basename(csv_path)}"
+            if os.path.exists(csv_path):
+                data_items.append({
+                    "symbol": symbol,
+                    "chart_url": chart_url,
+                    "csv_path": csv_path,
+                    "csv_url": csv_url,
+                    "type": "chip"
+                })
 
-            chip_png = os.path.join(docs_path, file)
-            chip_csv = os.path.join(docs_path, file.replace("_chip_timeline_pro.png", "_chip_strength.csv"))
-            liq_png = os.path.join(docs_path, f"{symbol}_liquidity_curves.png")
-
-            chip_chart_url = f"{base_url}/{file}#v={version_tag}"
-            liq_chart_url = f"{base_url}/{os.path.basename(liq_png)}#v={version_tag}" if os.path.exists(liq_png) else None
-
+        # 流动性曲线图
+        elif "_liquidity_" in file and file.endswith(".png"):
+            symbol = file.split("_")[0]
+            version_tag = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{file}#v={version_tag}"
             data_items.append({
                 "symbol": symbol,
-                "chip_chart_url": chip_chart_url,
-                "chip_csv": chip_csv,
-                "liq_chart_url": liq_chart_url,
+                "chart_url": chart_url,
+                "csv_path": None,
+                "csv_url": None,
+                "type": "liquidity"
             })
 
     if not data_items:
-        print("[!] No chip analysis found, abort.")
+        print("[!] No chip or liquidity analysis found, abort.")
         return
 
-    print(f"[OK] Found {len(data_items)} chip items (with optional liquidity).")
-    update_summary(data_items)
-    print("[OK] Summary page updated successfully (Chip + Liquidity, No CSV for Liquidity)!")
+    clear_summary_blocks()
+    children = []
+
+    # 分组显示：每个 symbol 汇总其两张图
+    grouped = {}
+    for item in data_items:
+        grouped.setdefault(item["symbol"], []).append(item)
+
+    for symbol, items in grouped.items():
+        children.append({
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": {"rich_text": [{"type": "text", "text": {"content": symbol}}]}
+        })
+
+        for item in items:
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            label = "📊 筹码分析" if item["type"] == "chip" else "💧 流动性曲线"
+
+            # 图片标题
+            children.append({
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"type": "text", "text": {"content": f"{label}（更新于 {ts}）"}}]
+                }
+            })
+
+            # 插入图像
+            children.append({
+                "object": "block",
+                "type": "image",
+                "image": {"type": "external", "external": {"url": item["chart_url"]}}
+            })
+
+            # 如果是筹码分析，追加表格
+            if item["type"] == "chip" and item["csv_path"] and os.path.exists(item["csv_path"]):
+                try:
+                    df = pd.read_csv(item["csv_path"])
+                    children.extend(build_table_block(df))
+                except Exception as e:
+                    children.append({
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": {
+                            "rich_text": [{"type": "text", "text": {"content": f"[X] Failed to load table: {e}"}}]
+                        }
+                    })
+
+    # 上传到 Notion 页面
+    notion.blocks.children.append(NOTION_SUMMARY_PAGE_ID, children=children)
+    print(f"[OK] Summary updated successfully with {len(grouped)} symbols (chip + liquidity).")
+
 
 if __name__ == "__main__":
     upload_to_notion()
