@@ -100,9 +100,13 @@ def upload_to_notion():
 
     # 遍历 docs 目录，识别两类图表
     for file in os.listdir("docs"):
-        # 筹码分析图
+        # 筹码分析图（匹配 Binance_{symbol}_chip_timeline_pro.png）
         if file.endswith("_chip_timeline_pro.png"):
-            symbol = file.split("_")[1]
+            # 示例：Binance_AAVEUSDT_1h_2025-10-02_to_latest_chip_timeline_pro.png
+            name = os.path.splitext(file)[0]
+            parts = name.split("_")
+            # 查找第一个包含 USDT / USD 的段作为 symbol
+            symbol = next((p for p in parts if "USDT" in p or "USD" in p), parts[0])
             version_tag = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             chart_url = f"https://cmujin.github.io/crypto_csi_toolkit/{file}#v={version_tag}"
             csv_path = os.path.join("docs", file.replace("_chip_timeline_pro.png", "_chip_strength.csv"))
@@ -116,7 +120,7 @@ def upload_to_notion():
                     "type": "chip"
                 })
 
-        # 流动性曲线图
+        # 流动性曲线图（_liquidity_*.png）
         elif "_liquidity_" in file and file.endswith(".png"):
             symbol = file.split("_")[0]
             version_tag = datetime.utcnow().strftime("%Y%m%d%H%M%S")
