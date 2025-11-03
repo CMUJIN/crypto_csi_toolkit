@@ -71,7 +71,7 @@ jobs:
 
               # --- Step 2️⃣ 筹码 + 流动性分析 ---
               analysis_cmd = [
-                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1_fixed.py",
+                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
                   f"data/Binance_{symbol}_{freq}_{chip_start}_to_latest.csv",
                   "--window_strength", str(analysis.get("window_strength", 5)),
                   "--window_zone", str(analysis.get("window_zone", 60)),
