@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto Chip Timeline Analysis + Liquidity Curve (hybrid, fixed)
----------------------------------------------------------------
-Features:
-- Full chip zone analysis (futures logic)
-- Long/Short impulse curve
-- Liquidity curve (price vs Z-score)
-- Fixed: ensure liquidity uses DatetimeIndex (no resample error)
-- Outputs to docs/{SYMBOL}_liquidity_curves.csv/.png
+Crypto Chip Timeline Analysis + Liquidity Curve (hybrid, fixed start-times)
+---------------------------------------------------------------------------
+Fixes:
+- Liquidity uses its own start time (liquidity_start), independent of chip start
+- Keep df_all (raw) for liquidity; df_chip (filtered) for chip
+- Add warm-up buffer for rolling Z window before liquidity_start
 """
 
-import argparse, sys, re, os
+import argparse, re
 import pandas as pd, numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -139,7 +137,7 @@ def draw_timeline(df, chip_df, out_png, ma_period, long_curve, short_curve):
     print(f"[OK] Saved chip timeline -> {out_png}")
 
 # ==============================
-# Liquidity Section (fixed)
+# Liquidity Section (fixed start)
 # ==============================
 def detect_quote_volume_column(df):
     for c in df.columns:
@@ -162,31 +160,59 @@ def compute_liquidity_series(df, span_hours=24, zwin_days=90):
     return zscore_rolling(lp_hr, int(24*zwin_days)), price
 
 def draw_liquidity_curves(df_hourly, symbol, out_csv, out_png, span_hours=24, zwin_days=90, start_dt=None):
+    # 保证有 DatetimeIndex
     df = df_hourly.copy()
     df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce", utc=True)
     df = df.dropna(subset=["datetime"]).set_index("datetime").sort_index()
+
+    # 计算期：为保证滚动Z分正确，引入预热窗口
     if start_dt is not None:
-        df = df[df.index >= start_dt]
-    liq_z, price = compute_liquidity_series(df.reset_index(), span_hours, zwin_days)
-    liq_z.index, price.index = df.index, df.index
-    daily = pd.DataFrame({"Liquidity": liq_z.resample("1D").mean(), "Price": price.resample("1D").last()}).dropna()
-    weekly = pd.DataFrame({"Liquidity": liq_z.resample("1W").mean(), "Price": price.resample("1W").last()}).dropna()
+        warmup_start = (pd.to_datetime(start_dt, utc=True) - pd.Timedelta(days=zwin_days + 7))
+        df_compute = df[df.index >= warmup_start]
+    else:
+        df_compute = df
+
+    liq_z, price = compute_liquidity_series(df_compute.reset_index(), span_hours, zwin_days)
+    liq_z.index = df_compute.index
+    price.index = df_compute.index
+
+    # 输出期：严格从 liquidity_start 开始
+    if start_dt is not None:
+        liq_z = liq_z[liq_z.index >= pd.to_datetime(start_dt, utc=True)]
+        price = price[price.index >= pd.to_datetime(start_dt, utc=True)]
+
+    # 重采样
+    daily = pd.DataFrame({
+        "Liquidity": liq_z.resample("1D").mean(),
+        "Price": price.resample("1D").last()
+    }).dropna()
+    weekly = pd.DataFrame({
+        "Liquidity": liq_z.resample("1W").mean(),
+        "Price": price.resample("1W").last()
+    }).dropna()
+
+    # 保存
     pd.DataFrame({"LP_HR_Z": liq_z, "Price": price}).dropna().to_csv(out_csv)
     print(f"[OK] Saved liquidity table -> {out_csv}")
+
+    # 绘图
     fig = plt.figure(figsize=(12,8))
     ax1 = plt.subplot(2,1,1)
-    ax1.plot(weekly.index, weekly["Price"], color="tab:red", label="Price")
+    ax1.plot(weekly.index, weekly["Price"], color="tab:red", label="Price", alpha=0.8)
     ax1b = ax1.twinx()
     ax1b.plot(weekly.index, weekly["Liquidity"], color="tab:blue", label="Liquidity (Z)")
     for y in [-2,-1,0,1,2]: ax1b.axhline(y=y, color="gray", ls="--", lw=0.8, alpha=0.6)
     ax1.set_title(f"{symbol} Weekly Price vs Liquidity Z")
+    ax1.legend(loc="upper left"); ax1b.legend(loc="upper right")
+
     ax2 = plt.subplot(2,1,2)
     tail = daily.iloc[-90:]
-    ax2.plot(tail.index, tail["Price"], color="tab:red", label="Price")
+    ax2.plot(tail.index, tail["Price"], color="tab:red", label="Price", alpha=0.8)
     ax2b = ax2.twinx()
     ax2b.plot(tail.index, tail["Liquidity"], color="tab:blue", label="Liquidity (Z)")
     for y in [-2,-1,0,1,2]: ax2b.axhline(y=y, color="gray", ls="--", lw=0.8, alpha=0.6)
     ax2.set_title(f"{symbol} Daily Liquidity (90d)")
+    ax2.legend(loc="upper left"); ax2b.legend(loc="upper right")
     plt.tight_layout(); fig.savefig(out_png, dpi=160, bbox_inches="tight"); plt.close(fig)
     print(f"[OK] Saved liquidity figure -> {out_png}")
 
@@ -204,52 +230,63 @@ def main():
     ap.add_argument("--quantile", type=float, default=0.8)
     ap.add_argument("--ma_period", type=int, default=10)
     ap.add_argument("--smooth", type=int, default=3)
-    ap.add_argument("--liquidity_start", type=str)
+    ap.add_argument("--liquidity_start", type=str, help="YYYY-MM-DD")
     ap.add_argument("--out_dir", type=str, default="docs")
     ap.add_argument("--liquidity_span_hours", type=int, default=24)
     ap.add_argument("--liquidity_zwindow_days", type=int, default=90)
     args = ap.parse_args()
 
-    df = pd.read_csv(args.csv)
-    df.columns = [c.lower().strip() for c in df.columns]
+    # 读取并标准化
+    df_all = pd.read_csv(args.csv)
+    df_all.columns = [c.lower().strip() for c in df_all.columns]
     rename = {}
     col_map = {"open": ["open"], "high": ["high"], "low": ["low"], "close": ["close","last"],
-               "volume":["volume","volumeusd","volume usdt"],"datetime":["datetime","date","timestamp"]}
+               "volume":["volume","volumeusd","volume usdt"], "datetime":["datetime","date","timestamp"]}
     for k,v in col_map.items():
         for c in v:
-            if c in df.columns: rename[c]=k; break
-    df = df.rename(columns=rename)
-    if "datetime" not in df.columns:
+            if c in df_all.columns: rename[c]=k; break
+    df_all = df_all.rename(columns=rename)
+    if "datetime" not in df_all.columns:
         raise SystemExit("[X] Missing datetime column")
-    df["datetime"]=to_utc_datetime(df["datetime"])
+    df_all["datetime"] = to_utc_datetime(df_all["datetime"])
 
-    m=re.search(r'_(\d{4}-\d{2}-\d{2})_to_',args.csv)
+    # df_chip：仅用于筹码分析，保留原有“按文件名起始时间”过滤逻辑
+    df_chip = df_all.copy()
+    m = re.search(r'_(\d{4}-\d{2}-\d{2})_to_', args.csv)
     if m:
-        start_dt=pd.to_datetime(m.group(1),utc=True)
-        df=df[df["datetime"]>=start_dt]
-        print(f"[*] Filtered from {start_dt.strftime('%Y-%m-%d')}, rows={len(df)}")
+        chip_start = pd.to_datetime(m.group(1), utc=True)
+        df_chip = df_chip[df_chip["datetime"] >= chip_start]
+        print(f"[*] Chip filter from {chip_start.strftime('%Y-%m-%d')}, rows={len(df_chip)}")
 
-    chip_df=compute_chipzones_futures_logic(df,args.window_zone,args.bins_pct,args.beta,args.half_life,args.quantile)
-    if "open_interest" in df.columns:
-        oi=pd.to_numeric(df["open_interest"],errors="coerce").fillna(0)
-        delta_oi=oi.diff().clip(lower=0).fillna(0).values
-    else: delta_oi=np.zeros(len(df))
-    decay=exp_half_life_decay(df["datetime"],args.half_life)
-    eff_weight=df["volume"].astype(float).values*np.power(1+delta_oi,args.beta)*decay
-    long_curve,short_curve=compute_long_short(df["close"],eff_weight,args.window_strength,args.smooth,args.window_zone)
+    # ---- Chip analysis ----
+    chip_df = compute_chipzones_futures_logic(df_chip, args.window_zone, args.bins_pct, args.beta, args.half_life, args.quantile)
+    if "open_interest" in df_chip.columns:
+        oi = pd.to_numeric(df_chip["open_interest"], errors="coerce").fillna(0)
+        delta_oi = oi.diff().clip(lower=0).fillna(0).values
+    else:
+        delta_oi = np.zeros(len(df_chip))
+    decay = exp_half_life_decay(df_chip["datetime"], args.half_life)
+    eff_weight = df_chip["volume"].astype(float).values * np.power(1 + delta_oi, args.beta) * decay
+    long_curve, short_curve = compute_long_short(df_chip["close"], eff_weight, args.window_strength, args.smooth, args.window_zone)
 
-    chip_csv=args.csv.replace(".csv","_chip_strength.csv")
-    chip_df.to_csv(chip_csv,index=False)
-    chip_png=args.csv.replace(".csv","_chip_timeline_pro.png")
-    draw_timeline(df,chip_df,chip_png,args.ma_period,long_curve,short_curve)
+    chip_csv = args.csv.replace(".csv","_chip_strength.csv")
+    chip_df.to_csv(chip_csv, index=False)
+    chip_png = args.csv.replace(".csv","_chip_timeline_pro.png")
+    draw_timeline(df_chip, chip_df, chip_png, args.ma_period, long_curve, short_curve)
 
-    out_dir=Path(args.out_dir); out_dir.mkdir(exist_ok=True)
-    symbol=extract_symbol_from_filename(args.csv)
-    liq_csv=out_dir/f"{symbol}_liquidity_curves.csv"
-    liq_png=out_dir/f"{symbol}_liquidity_curves.png"
-    liq_start=pd.to_datetime(args.liquidity_start,utc=True) if args.liquidity_start else None
-    draw_liquidity_curves(df[["datetime","open","high","low","close","volume"]].copy() if all(c in df.columns for c in ["open","high","low"]) else df[["datetime","close","volume"]].copy(),
-                          symbol,liq_csv,liq_png,args.liquidity_span_hours,args.liquidity_zwindow_days,liq_start)
+    # ---- Liquidity analysis ----
+    out_dir = Path(args.out_dir); out_dir.mkdir(exist_ok=True)
+    symbol = extract_symbol_from_filename(args.csv)
+    liq_csv = out_dir / f"{symbol}_liquidity_curves.csv"
+    liq_png = out_dir / f"{symbol}_liquidity_curves.png"
+    liq_start = pd.to_datetime(args.liquidity_start, utc=True) if args.liquidity_start else None
+
+    # 注意：传入未截断的 df_all，由 draw_liquidity_curves 内部依据 liquidity_start + 预热窗口自行裁剪
+    cols = ["datetime","close","volume"]
+    if all(c in df_all.columns for c in ["open","high","low"]):
+        cols = ["datetime","open","high","low","close","volume"]
+    draw_liquidity_curves(df_all[cols].copy(), symbol, liq_csv, liq_png,
+                          args.liquidity_span_hours, args.liquidity_zwindow_days, liq_start)
 
 if __name__=="__main__":
     main()
