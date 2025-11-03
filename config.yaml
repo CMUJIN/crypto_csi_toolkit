@@ -19,8 +19,11 @@ analysis:
   ma_period: 10
   smooth: 3
 
+  # ✅ 新增兼容字段，让 auto_run.yml 能读取 liquidity_start
+  liquidity_start: 2024-10-01
+
 liquidity:
-  # 流动性曲线分析参数
+  # 流动性曲线分析参数（供主程序内部使用）
   start: 2024-10-01           # 历史流动性曲线的起始时间（用于曲线分析）
   span_hours: 24              # 平滑窗口（默认1天）
   zscore_window_days: 90      # Z分标准化窗口
