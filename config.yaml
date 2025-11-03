@@ -18,3 +18,11 @@ analysis:
   quantile: 0.8
   ma_period: 10
   smooth: 3
+
+liquidity:
+  # 流动性曲线分析参数
+  start: 2024-10-01           # 历史流动性曲线的起始时间（用于曲线分析）
+  span_hours: 24              # 平滑窗口（默认1天）
+  zscore_window_days: 90      # Z分标准化窗口
+  out_dir: docs               # 输出路径，与chip分析共用
+  upload_to_notion: true      # 是否推送至Notion
