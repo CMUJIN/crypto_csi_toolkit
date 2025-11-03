@@ -3,7 +3,7 @@ name: Auto Crypto CSI Analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 */4 * * *'   # 每4小时运行一次
 
 permissions:
   contents: write
@@ -11,6 +11,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -35,31 +36,43 @@ jobs:
           if not cfg_path.exists():
               raise FileNotFoundError("Missing config.yaml")
 
+          # 载入配置文件
           cfg = yaml.safe_load(cfg_path.read_text())
           symbols = cfg.get("symbols", [])
           analysis = cfg.get("analysis", {})
 
+          # 读取全局参数
+          liquidity_start = str(analysis.get("liquidity_start", ""))
+          print(f"[INFO] Global liquidity_start = {liquidity_start}")
+
           for item in symbols:
               symbol = item.get("symbol") or item.get("name")
               freq = item.get("freq") or item.get("timeframe") or "1h"
-              start = str(item.get("start", "2025-08-01"))
+              chip_start = str(item.get("start", "2025-08-01"))
 
               if not symbol:
                   raise ValueError(f"Invalid entry in config.yaml: {item}")
 
               print(f"=== Processing {symbol} ({freq}) ===")
 
-              subprocess.run([
+              # --- Step 1️⃣ 下载历史数据 ---
+              fetch_cmd = [
                   "python", "crypto_cdd_fetcher.py",
                   "--symbol", symbol,
                   "--freq", freq,
-                  "--start", start,
-                  "--out", f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv"
-              ], check=True)
+                  "--start", chip_start,
+                  "--out", f"data/Binance_{symbol}_{freq}_{chip_start}_to_latest.csv"
+              ]
+              # 如果定义了 liquidity_start，则传入
+              if liquidity_start:
+                  fetch_cmd += ["--liquidity_start", liquidity_start]
 
-              subprocess.run([
-                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1.py",
-                  f"data/Binance_{symbol}_{freq}_{start}_to_latest.csv",
+              subprocess.run(fetch_cmd, check=True)
+
+              # --- Step 2️⃣ 筹码 + 流动性分析 ---
+              analysis_cmd = [
+                  "python", "crypto_chip_timeline_analysis_PRO_v3.9.1_fixed.py",
+                  f"data/Binance_{symbol}_{freq}_{chip_start}_to_latest.csv",
                   "--window_strength", str(analysis.get("window_strength", 5)),
                   "--window_zone", str(analysis.get("window_zone", 60)),
                   "--bins_pct", str(analysis.get("bins_pct", 1)),
@@ -68,23 +81,27 @@ jobs:
                   "--quantile", str(analysis.get("quantile", 0.8)),
                   "--ma_period", str(analysis.get("ma_period", 10)),
                   "--smooth", str(analysis.get("smooth", 3))
-              ], check=True)
+              ]
+              if liquidity_start:
+                  analysis_cmd += ["--liquidity_start", liquidity_start]
 
-              print(f"[OK] Finished {symbol} ({freq}) analysis successfully.")
+              subprocess.run(analysis_cmd, check=True)
+              print(f"[OK] Finished {symbol} ({freq}) successfully.")
           PY
 
       - name: Run analysis
         run: |
-          echo "[INFO] Cleaning all old docs..."
+          echo "[INFO] Cleaning old docs..."
+          mkdir -p data docs
           find docs/ -mindepth 1 -type f -delete || true
           find docs/ -mindepth 1 -type d -empty -delete || true
           python run_analysis.py
-
 
       - name: Sync results to docs
         run: |
           mkdir -p docs
           cp -r data/* docs/ || true
+          echo "[INFO] Final docs directory:"
           ls -lh docs/ || true
 
       - name: Commit and push results
@@ -94,10 +111,10 @@ jobs:
           git add docs/
           git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || echo "No changes"
           git push || echo "No permission to push"
-      
+
       - name: Wait for GitHub Pages to refresh
         run: |
-          echo "[INFO] Waiting 90 seconds for GitHub Pages to deploy new docs..."
+          echo "[INFO] Waiting 90 seconds for GitHub Pages to deploy..."
           sleep 90
 
       - name: Upload results to Notion
