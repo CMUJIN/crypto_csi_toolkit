@@ -3,7 +3,7 @@ name: Auto Crypto CSI Analysis
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'   # 每4小时运行一次
+    - cron: '0 */2 * * *'   # 每4小时运行一次
 
 permissions:
   contents: write
