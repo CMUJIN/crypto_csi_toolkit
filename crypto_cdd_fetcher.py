@@ -1,41 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Crypto CDD Fetcher — hybrid (chip + liquidity)
-----------------------------------------------
-✅ 自动检测并合并 Chip 与 Liquidity 起始时间
-   - 若存在环境变量 LIQUIDITY_START，则取两者中较早者
-✅ 输出字段与原版一致（9列）
-✅ Binance 自动补齐、镜像切换、回补逻辑保留
-✅ 兼容 GitHub Actions 或本地执行
-
-调用示例：
-    export LIQUIDITY_START=2024-10-01
-    python3 crypto_cdd_fetcher.py \
-        --symbol BTCUSDT \
-        --freq 1h \
-        --start 2025-10-02 \
-        --out data/Binance_BTCUSDT_1h_2025-10-02_to_latest.csv
+Crypto CDD Fetcher — extended for liquidity curve
+-------------------------------------------------
+✓ 输出字段统一为 9 列（去掉 taker_base_vol / taker_quote_vol）
+✓ CDC 与 Binance 自动兼容、合并与回补
+✓ 支持 --liquidity_start 参数：取 chip_start 与 liquidity_start 的最早时间作为下载起点
+✓ Binance 451 自动切换镜像；失败不中断
 """
 
 import argparse
 import io
 import os
 from datetime import datetime, timezone
-
 import numpy as np
 import pandas as pd
 import requests
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; CryptoCSI/lite)"}
 BINANCE_INTERVALS = {"1h": "1h", "4h": "4h", "1d": "1d"}
-
 SCHEMA = [
     "Unix", "Date", "Symbol",
     "Open", "High", "Low", "Close",
     "Volume", "Volume USDT",
     "tradecount",
 ]
+
 
 # -------------------------------
 # Utilities
@@ -59,6 +49,7 @@ def _numeric(x):
     except Exception:
         return np.nan
 
+
 # -------------------------------
 # 1) Load & normalize CDC (CDD)
 # -------------------------------
@@ -72,6 +63,7 @@ def fetch_cdd(symbol: str, freq: str) -> pd.DataFrame:
     raw = pd.read_csv(io.StringIO(r.text), skiprows=1)
     raw.columns = [c.strip() for c in raw.columns]
 
+    # 统一 Date
     if "Date" in raw.columns:
         raw["Date"] = pd.to_datetime(raw["Date"], errors="coerce", utc=True)
     elif "date" in raw.columns:
@@ -79,13 +71,16 @@ def fetch_cdd(symbol: str, freq: str) -> pd.DataFrame:
     else:
         raise ValueError("[X] CDC CSV missing Date column")
 
+    # Unix（如无则生成）
     if "Unix" not in raw.columns and "unix" in raw.columns:
         raw = raw.rename(columns={"unix": "Unix"})
     if "Unix" not in raw.columns:
         raw["Unix"] = raw["Date"].map(_to_utc_ms)
 
+    # 统一 Symbol
     raw["Symbol"] = symbol.upper()
 
+    # 统一 OHLC
     rename = {}
     for std, cands in {
         "Open": ["Open", "open"],
@@ -99,48 +94,40 @@ def fetch_cdd(symbol: str, freq: str) -> pd.DataFrame:
                 break
     raw = raw.rename(columns=rename)
 
+    # 成交量（基础）
     vol_base_col = None
     for cand in ["Volume", "Volume ETH", "Volume BTC", "Volume (ETH)", "volume"]:
         if cand in raw.columns:
             vol_base_col = cand
             break
-    raw["Volume"] = pd.to_numeric(raw[vol_base_col], errors="coerce") if vol_base_col else np.nan
+    raw["Volume"] = pd.to_numeric(raw.get(vol_base_col, np.nan), errors="coerce")
 
+    # 成交量（quote / USDT）
     vol_quote_col = None
     for cand in ["Volume USDT", "VolumeUSD", "Volume USD", "volume usd", "QuoteVolume", "Quote Volume"]:
         if cand in raw.columns:
             vol_quote_col = cand
             break
-    raw["Volume USDT"] = pd.to_numeric(raw[vol_quote_col], errors="coerce") if vol_quote_col else np.nan
+    raw["Volume USDT"] = pd.to_numeric(raw.get(vol_quote_col, np.nan), errors="coerce")
 
-    if "tradecount" in raw.columns:
-        raw["tradecount"] = pd.to_numeric(raw["tradecount"], errors="coerce").astype("Int64")
-    elif "Trades" in raw.columns:
+    # tradecount
+    if "Trades" in raw.columns:
         raw["tradecount"] = pd.to_numeric(raw["Trades"], errors="coerce").astype("Int64")
+    elif "tradecount" in raw.columns:
+        raw["tradecount"] = pd.to_numeric(raw["tradecount"], errors="coerce").astype("Int64")
     else:
         raw["tradecount"] = pd.array([pd.NA] * len(raw), dtype="Int64")
 
+    # 数值类型
     for k in ["Open", "High", "Low", "Close"]:
         raw[k] = pd.to_numeric(raw[k], errors="coerce")
 
     raw = raw.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
 
-    out = pd.DataFrame(
-        {
-            "Unix": raw["Unix"],
-            "Date": raw["Date"],
-            "Symbol": raw["Symbol"],
-            "Open": raw["Open"],
-            "High": raw["High"],
-            "Low": raw["Low"],
-            "Close": raw["Close"],
-            "Volume": raw["Volume"],
-            "Volume USDT": raw["Volume USDT"],
-            "tradecount": raw["tradecount"],
-        }
-    )
+    out = raw[["Unix", "Date", "Symbol", "Open", "High", "Low", "Close", "Volume", "Volume USDT", "tradecount"]]
     print(f"[✓] CDD normalized, rows={len(out)}, last={out['Date'].max()}")
     return _ensure_columns(out)
+
 
 # -------------------------------
 # 2) Load & normalize Binance
@@ -150,6 +137,7 @@ def _binance_endpoints():
         "https://api.binance.com/api/v3/klines",
         "https://data-api.binance.vision/api/v3/klines",
     ]
+
 
 def fetch_binance(symbol: str, interval: str, start_time: pd.Timestamp) -> pd.DataFrame:
     params = {
@@ -177,57 +165,39 @@ def fetch_binance(symbol: str, interval: str, start_time: pd.Timestamp) -> pd.Da
             df = pd.DataFrame(
                 data,
                 columns=[
-                    "open_time",
-                    "open",
-                    "high",
-                    "low",
-                    "close",
-                    "volume",
-                    "close_time",
-                    "quote_asset_volume",
-                    "trades",
-                    "taker_buy_base",
-                    "taker_buy_quote",
-                    "ignore",
+                    "open_time", "open", "high", "low", "close", "volume",
+                    "close_time", "quote_asset_volume", "trades",
+                    "taker_buy_base", "taker_buy_quote", "ignore"
                 ],
             )
 
             df["Date"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
             df["Unix"] = df["open_time"].astype("int64")
             df["Symbol"] = symbol.upper()
-
             for c in ["open", "high", "low", "close", "volume", "quote_asset_volume"]:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
             df["trades"] = pd.to_numeric(df["trades"], errors="coerce").astype("Int64")
 
-            df = df.sort_values("Date")
+            out = pd.DataFrame({
+                "Unix": df["Unix"], "Date": df["Date"], "Symbol": df["Symbol"],
+                "Open": df["open"], "High": df["high"], "Low": df["low"],
+                "Close": df["close"], "Volume": df["volume"],
+                "Volume USDT": df["quote_asset_volume"], "tradecount": df["trades"]
+            })
 
-            out = pd.DataFrame(
-                {
-                    "Unix": df["Unix"],
-                    "Date": df["Date"],
-                    "Symbol": df["Symbol"],
-                    "Open": df["open"],
-                    "High": df["high"],
-                    "Low": df["low"],
-                    "Close": df["close"],
-                    "Volume": df["volume"],
-                    "Volume USDT": df["quote_asset_volume"],
-                    "tradecount": df["trades"],
-                }
-            )
-
-            print(f"[+] Binance fetched {len(out)} rows, {out['Date'].min()} → {out['Date'].max()}")
+            print(f"[+] Binance fetched {len(out)} rows, from {out['Date'].min()} → {out['Date'].max()}")
             return _ensure_columns(out)
         except Exception as e:
             print(f"[!] Binance fetch error @ {ep}: {e}")
+
     return pd.DataFrame(columns=SCHEMA)
+
 
 # -------------------------------
 # 3) Merge & heal
 # -------------------------------
-def merge_and_heal(df_cdd, df_binance):
-    merged = pd.concat([df_cdd, df_binance], ignore_index=True) if not df_binance.empty else df_cdd.copy()
+def merge_and_heal(df_cdd: pd.DataFrame, df_binance: pd.DataFrame) -> pd.DataFrame:
+    merged = pd.concat([df_cdd, df_binance], ignore_index=True)
     merged = merged.drop_duplicates(subset=["Date"], keep="last").sort_values("Date").reset_index(drop=True)
 
     cls = pd.to_numeric(merged["Close"], errors="coerce")
@@ -236,27 +206,15 @@ def merge_and_heal(df_cdd, df_binance):
 
     need_b = vb.isna() & vq.notna() & cls.notna() & (cls != 0)
     merged.loc[need_b, "Volume"] = (vq / cls)[need_b]
+
     need_q = vq.isna() & vb.notna() & cls.notna()
     merged.loc[need_q, "Volume USDT"] = (vb * cls)[need_q]
 
     return _ensure_columns(merged)
 
-# -------------------------------
-# 4) Gap check
-# -------------------------------
-def check_gaps(df, freq):
-    if df.empty: return
-    dt_hours = df["Date"].diff().dt.total_seconds().div(3600)
-    gap_threshold = {"1h": 1.5, "4h": 5, "1d": 26}.get(freq, 1.5)
-    gaps = df.loc[dt_hours > gap_threshold, "Date"]
-    if len(gaps) > 0:
-        print(f"[!] 时间缺口 {len(gaps)}（示例前5）：")
-        for g in gaps.head(5): print("   -", g)
-    else:
-        print("[✓] 时间序列连续")
 
 # -------------------------------
-# 5) Main
+# 4) Main
 # -------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -264,20 +222,16 @@ def main():
     ap.add_argument("--freq", required=True, choices=["1h", "4h", "1d"])
     ap.add_argument("--start", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--liquidity_start", required=False, help="Optional: earliest liquidity analysis start date")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
 
-    # --- 关键改动：合并 Liquidity 起始时间 ---
-    liq_start_env = os.environ.get("LIQUIDITY_START")
-    chip_start_dt = pd.to_datetime(args.start, utc=True)
-    if liq_start_env:
-        liq_start_dt = pd.to_datetime(liq_start_env, utc=True)
-        start_dt = min(chip_start_dt, liq_start_dt)
-        print(f"[*] Combined start = min(chip={chip_start_dt.date()}, liquidity={liq_start_dt.date()}) -> {start_dt.date()}")
-    else:
-        start_dt = chip_start_dt
-        print(f"[*] Using chip start only -> {start_dt.date()}")
+    # ✅ 取最早的日期
+    chip_start = pd.to_datetime(args.start, utc=True)
+    liq_start = pd.to_datetime(args.liquidity_start, utc=True) if args.liquidity_start else chip_start
+    start_dt = min(chip_start, liq_start)
+    print(f"[*] Combined start = min(chip={chip_start.date()}, liquidity={liq_start.date() if liq_start else chip_start.date()}) -> {start_dt.date()}")
 
     try:
         cdd = fetch_cdd(args.symbol, args.freq)
@@ -291,22 +245,15 @@ def main():
             print("[=] CDD 已接近最新，无需 Binance 补齐")
 
         merged = merge_and_heal(cdd, df_binance)
-
         out_df = merged[merged["Date"] >= start_dt].reset_index(drop=True)
-        print(f"[*] Filter >= {start_dt.date()}, rows={len(out_df)}, first={out_df['Date'].min()}, last={out_df['Date'].max()}")
 
-        check_gaps(out_df, args.freq)
+        print(f"[*] Filter >= {start_dt.date()}, rows={len(out_df)}, first={out_df['Date'].min()}, last={out_df['Date'].max()}")
         out_df.to_csv(args.out, index=False)
-        print(f"[OK] Saved -> {args.out}  rows={len(out_df)}")
+        print(f"[OK] Saved -> {args.out} rows={len(out_df)}")
 
     except Exception as e:
-        print(f"[X] 运行错误: {e}")
-        try:
-            cdd = cdd[cdd["Date"] >= start_dt].reset_index(drop=True)
-            _ensure_columns(cdd).to_csv(args.out, index=False)
-            print(f"[!] 已保存过滤后的 CDD 数据 -> {args.out} rows={len(cdd)}")
-        except Exception as ee:
-            print(f"[X] 兜底保存失败: {ee}")
+        print(f"[X] Error: {e}")
+
 
 if __name__ == "__main__":
     main()
